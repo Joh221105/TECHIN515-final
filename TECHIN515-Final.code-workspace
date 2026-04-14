@@ -1,0 +1,8 @@
+{
+  "folders": [
+    { "path": "firmware", "name": "Firmware (Teensy 4.1)" },
+    { "path": "web",      "name": "Web Dashboard" },
+    { "path": "tools",    "name": "Tools" }
+  ],
+  "settings": {}
+}
