@@ -1,0 +1,207 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>PSSS Leak Sensor Dashboard</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: system-ui, sans-serif;
+      background: #0f172a;
+      color: #e2e8f0;
+      min-height: 100vh;
+      padding: 2rem;
+    }
+
+    h1 { font-size: 1.5rem; margin-bottom: 0.25rem; }
+    .subtitle { color: #94a3b8; font-size: 0.875rem; margin-bottom: 2rem; }
+
+    .status-bar {
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+      margin-bottom: 2rem;
+      font-size: 0.875rem;
+    }
+
+    .dot {
+      width: 10px; height: 10px;
+      border-radius: 50%;
+      background: #ef4444;
+      transition: background 0.3s;
+    }
+    .dot.connected { background: #22c55e; animation: pulse 2s infinite; }
+
+    @keyframes pulse {
+      0%, 100% { opacity: 1; }
+      50% { opacity: 0.4; }
+    }
+
+    .cards {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+      gap: 1rem;
+      margin-bottom: 2rem;
+    }
+
+    .card {
+      background: #1e293b;
+      border-radius: 0.75rem;
+      padding: 1.25rem;
+      border: 1px solid #334155;
+    }
+
+    .card-label {
+      font-size: 0.75rem;
+      color: #94a3b8;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      margin-bottom: 0.5rem;
+    }
+
+    .card-value {
+      font-size: 2rem;
+      font-weight: 700;
+      font-variant-numeric: tabular-nums;
+    }
+
+    .card-unit {
+      font-size: 0.875rem;
+      color: #94a3b8;
+      margin-left: 0.25rem;
+    }
+
+    .card.alert .card-value { color: #f87171; }
+    .card.ok .card-value { color: #34d399; }
+
+    .log-section h2 {
+      font-size: 1rem;
+      margin-bottom: 0.75rem;
+      color: #94a3b8;
+    }
+
+    #log {
+      background: #0f172a;
+      border: 1px solid #334155;
+      border-radius: 0.5rem;
+      padding: 1rem;
+      height: 260px;
+      overflow-y: auto;
+      font-family: monospace;
+      font-size: 0.8rem;
+      color: #64748b;
+    }
+
+    #log .entry { margin-bottom: 0.25rem; }
+    #log .entry.psss { color: #7dd3fc; }
+    #log .entry.raw  { color: #475569; }
+    #log .entry.sys  { color: #a78bfa; }
+  </style>
+</head>
+<body>
+  <h1>PSSS Leak Sensor</h1>
+  <p class="subtitle">Real-time data via BLE bridge</p>
+
+  <div class="status-bar">
+    <div class="dot" id="dot"></div>
+    <span id="status-text">Disconnected — run tools/ble_connect.py first</span>
+  </div>
+
+  <div class="cards">
+    <div class="card" id="card-status">
+      <div class="card-label">Sensor Status</div>
+      <div class="card-value" id="val-status">—</div>
+    </div>
+    <div class="card">
+      <div class="card-label">Value 1</div>
+      <div class="card-value" id="val-1">—<span class="card-unit"></span></div>
+    </div>
+    <div class="card">
+      <div class="card-label">Value 2</div>
+      <div class="card-value" id="val-2">—<span class="card-unit"></span></div>
+    </div>
+    <div class="card">
+      <div class="card-label">Value 3</div>
+      <div class="card-value" id="val-3">—<span class="card-unit"></span></div>
+    </div>
+    <div class="card">
+      <div class="card-label">Last Update</div>
+      <div class="card-value" id="val-time" style="font-size:1rem;padding-top:0.5rem;">—</div>
+    </div>
+  </div>
+
+  <div class="log-section">
+    <h2>Raw Log</h2>
+    <div id="log"></div>
+  </div>
+
+  <script>
+    const WS_URL = "ws://localhost:8765";
+    const MAX_LOG_LINES = 200;
+
+    const dot        = document.getElementById("dot");
+    const statusText = document.getElementById("status-text");
+    const log        = document.getElementById("log");
+
+    function addLog(text, cls = "raw") {
+      const el = document.createElement("div");
+      el.className = `entry ${cls}`;
+      el.textContent = text;
+      log.appendChild(el);
+      // Trim old lines
+      while (log.children.length > MAX_LOG_LINES) log.removeChild(log.firstChild);
+      log.scrollTop = log.scrollHeight;
+    }
+
+    function updateCards(packet) {
+      document.getElementById("val-status").textContent = packet.status === 1 ? "OK" : "ALERT";
+      document.getElementById("card-status").className = "card " + (packet.status === 1 ? "ok" : "alert");
+      document.getElementById("val-1").childNodes[0].textContent = packet.value1.toFixed(2);
+      document.getElementById("val-2").childNodes[0].textContent = packet.value2.toFixed(0);
+      document.getElementById("val-3").childNodes[0].textContent = packet.value3.toFixed(2);
+      const t = new Date(packet.timestamp);
+      document.getElementById("val-time").textContent =
+        t.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+    }
+
+    function connect() {
+      addLog(`Connecting to ${WS_URL}...`, "sys");
+      const ws = new WebSocket(WS_URL);
+
+      ws.onopen = () => {
+        dot.classList.add("connected");
+        statusText.textContent = "Connected to bridge";
+        addLog("WebSocket connected.", "sys");
+      };
+
+      ws.onmessage = (event) => {
+        let packet;
+        try { packet = JSON.parse(event.data); } catch { return; }
+
+        if (packet.raw && !packet.status && !packet.value1) {
+          // Non-PSSS line forwarded for debug
+          addLog(packet.raw, "raw");
+        } else if (packet.value1 !== undefined) {
+          updateCards(packet);
+          addLog(packet.raw, "psss");
+        }
+      };
+
+      ws.onclose = () => {
+        dot.classList.remove("connected");
+        statusText.textContent = "Disconnected — retrying in 3 s...";
+        addLog("WebSocket closed. Retrying...", "sys");
+        setTimeout(connect, 3000);
+      };
+
+      ws.onerror = () => {
+        addLog("WebSocket error. Is ble_connect.py running?", "sys");
+      };
+    }
+
+    connect();
+  </script>
+</body>
+</html>
