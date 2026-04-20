@@ -1,41 +1,58 @@
 #include <Arduino.h>
+#include <Wire.h>
+#include <Adafruit_MLX90614.h>
+#include <Audio.h>
 
-// Teensy 4.1 HM-10 BLE Test
-// Pin 0 (RX1) -> HM-10 TXD
-// Pin 1 (TX1) -> HM-10 RXD
+// ── Wiring ────────────────────────────────────────────────────
+// SPH0645: BCLK→Pin21  LRCL→Pin20  DOUT→Pin8  SEL→GND  3V→3.3V
+// MLX90614: SCL→Pin19  SDA→Pin18  VDD→3.3V  VSS→GND
 
-uint32_t last_send = 0;
-bool connected = false;
+#define AUDIO_SAMPLE_RATE_EXACT 44100.0f
+
+// ── Noise detection thresholds ────────────────────────────────
+#define NOISE_THRESHOLD     500     // RMS counts above this = loud noise
+#define PRINT_INTERVAL_MS   500
+
+// ── I2S audio objects (SPH0645) ───────────────────────────────
+AudioInputI2S        i2s_in;
+AudioAnalyzeRMS      rms;
+AudioConnection      patch(i2s_in, 0, rms, 0);
+
+// ── Thermal ───────────────────────────────────────────────────
+Adafruit_MLX90614 mlx;
+
+unsigned long last_print = 0;
 
 void setup() {
-  Serial.begin(9600);
-  Serial1.begin(9600);
-  delay(1000);
-  Serial1.print("AT+NAMEPSSS_LEAK");
-  delay(500);
-  Serial.println("Waiting for BLE connection...");
+  Serial.begin(115200);
+  while (!Serial && millis() < 3000);
+
+  AudioMemory(8);
+
+  Wire.begin();
+  if (!mlx.begin()) {
+    Serial.println("ERROR: MLX90614 not found — check SDA→Pin18, SCL→Pin19");
+    while (1);
+  }
+
+  Serial.println("Ready. Expose sensor to noise to trigger a reading.");
+  Serial.println("RMS     | Obj Temp (C) | Ambient (C)");
+  Serial.println("--------|-------------|------------");
 }
 
 void loop() {
-  while (Serial1.available()) {
-    String msg = Serial1.readStringUntil('\n');
-    Serial.println(msg);  // print everything HM-10 sends for debugging
+  if (!rms.available()) return;
 
-    if (!connected) {
-      connected = true;
-      Serial.println("[BLE] Phone connected!");
-    }
+  float rms_val = rms.read() * 32768.0f;  // scale to counts
 
-    if (msg.indexOf("OK+LOST") >= 0) {
-      connected = false;
-      Serial.println("[BLE] Phone disconnected.");
-    }
-  }
+  if (rms_val < NOISE_THRESHOLD) return;  // quiet — skip
 
-  if (Serial.available()) Serial1.write(Serial.read());
+  unsigned long now = millis();
+  if (now - last_print < PRINT_INTERVAL_MS) return;
+  last_print = now;
 
-  if (connected && millis() - last_send >= 250) {
-    last_send = millis();
-    Serial1.println("$PSSS,1,8.50,312,3.20*");
-  }
+  float obj_temp = mlx.readObjectTempC();
+  float amb_temp = mlx.readAmbientTempC();
+
+  Serial.printf("%7.0f | %11.2f | %11.2f\n", rms_val, obj_temp, amb_temp);
 }
