@@ -117,7 +117,7 @@ header {
 /* ── main area ── */
 main {
   display: grid;
-  grid-template-columns: 1fr 220px;
+  grid-template-columns: minmax(0, 1fr) 220px;
   gap: 0;
   overflow: hidden;
   min-height: 0;
@@ -130,6 +130,7 @@ main {
   align-items: center;
   justify-content: center;
   padding: 20px;
+  min-height: 280px;
   background:
     radial-gradient(ellipse at 20% 50%, rgba(0,229,255,0.03) 0%, transparent 60%),
     var(--bg);
@@ -146,11 +147,14 @@ main {
 
 #heatmap {
   display: block;
-  max-width: 100%;
-  max-height: 100%;
+  width: min(100%, 640px);
+  height: auto;
+  aspect-ratio: 32 / 24;
+  max-height: min(72vh, 720px);
   image-rendering: pixelated;
   border-radius: 4px;
   position: relative; z-index: 1;
+  background: #05070a;
 }
 
 /* leak overlay label */
@@ -262,6 +266,31 @@ aside {
   border-top: 1px solid var(--border);
 }
 
+.acoustic-readout {
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg);
+  padding: 12px 10px;
+  text-align: center;
+}
+.acoustic-big {
+  font-family: var(--mono);
+  font-size: 1.25rem;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  color: var(--accent);
+  line-height: 1.2;
+}
+.acoustic-big.leak { color: var(--warn); }
+.acoustic-sub {
+  font-family: var(--mono);
+  font-size: 0.62rem;
+  color: var(--muted);
+  margin-top: 8px;
+  letter-spacing: 0.04em;
+  line-height: 1.35;
+}
+
 /* ── bottom bar ── */
 footer {
   border-top: 1px solid var(--border);
@@ -301,7 +330,11 @@ footer {
   pointer-events: none;
   transition: opacity 0.5s;
 }
-#idle-overlay.hidden { opacity: 0; pointer-events: none; }
+#idle-overlay.hidden {
+  opacity: 0;
+  pointer-events: none;
+  visibility: hidden;
+}
 
 .idle-icon {
   font-size: 2.5rem;
@@ -345,7 +378,7 @@ footer {
         <div class="idle-text">Connect HM-10 to begin streaming</div>
       </div>
 
-      <canvas id="heatmap" width="320" height="240"></canvas>
+      <canvas id="heatmap" width="640" height="480"></canvas>
 
       <div id="leak-label">⚠ LEAK DETECTED</div>
 
@@ -381,6 +414,13 @@ footer {
           <span class="stat-key">Baseline</span>
           <span class="stat-val" id="s-base">calibrating…</span>
         </div>
+      </div>
+
+      <div class="aside-title">Acoustic · SPH0645</div>
+      <div class="acoustic-readout">
+        <div class="stat-key" style="text-align:center;margin-bottom:6px">Ultrasonic level (SNR)</div>
+        <div class="acoustic-big" id="acoustic-snr">— dB</div>
+        <div class="acoustic-sub" id="acoustic-peak-line">Peak — kHz · bands 10–49 kHz</div>
       </div>
 
       <div class="aside-title">Fusion Gate</div>
@@ -457,13 +497,15 @@ const BLE_CHARACTERISTIC = '0000ffe1-0000-1000-8000-00805f9b34fb';
 // ── Frame format ─────────────────────────────────────────────
 // Header:   0xFF 0xFE                          (2 bytes)
 // Metadata: snr_db float32 + peak_freq float32 + flags uint8  (9 bytes)
+// Spectrum: 24 × uint8 (normalized clean magnitude sub-bands, ultrasonic)
 // Body:     768 × int16_t little-endian (temp × 10)           (1536 bytes)
-// Total:    2 + 9 + 1536 = 1547 bytes
-const HEADER_A    = 0xFF;
-const HEADER_B    = 0xFE;
-const FRAME_META  = 9;
-const FRAME_BODY  = 768 * 2;
-const FRAME_TOTAL = 2 + FRAME_META + FRAME_BODY;  // 1547 bytes
+// Total:    2 + 9 + 24 + 1536 = 1571 bytes
+const HEADER_A       = 0xFF;
+const HEADER_B       = 0xFE;
+const FRAME_META     = 9;
+const SPECTRUM_BYTES = 24;
+const FRAME_BODY     = 768 * 2;
+const FRAME_TOTAL    = 2 + FRAME_META + SPECTRUM_BYTES + FRAME_BODY;
 
 // ── Thermal detection ─────────────────────────────────────────
 const DELTA_T_THRESHOLD = 2.0;
@@ -541,7 +583,7 @@ function drawColorbar(tMin, tMax) {
 }
 
 // ── Render heatmap ────────────────────────────────────────────
-function renderFrame(temps, snr, peakFreq, acousticLeak) {
+function renderFrame(temps, snr, peakFreq, acousticLeak, thermalFromDevice, spectrum) {
   const GW = 32, GH = 24;
   const CW = canvas.width, CH = canvas.height;
   const img = ctx.createImageData(CW, CH);
@@ -603,7 +645,8 @@ function renderFrame(temps, snr, peakFreq, acousticLeak) {
   }
 
   const deltaT = baselineReady ? minT - baselineAvg : null;
-  const thermalPass  = deltaT !== null && deltaT <= -DELTA_T_THRESHOLD;
+  // Fusion matches firmware: thermal anomaly bit from Teensy (not a second client baseline).
+  const thermalPass = thermalFromDevice;
   const leakConfirmed = thermalPass && acousticLeak;
 
   document.getElementById('s-cold').textContent  = minT.toFixed(1) + ' °C';
@@ -619,7 +662,9 @@ function renderFrame(temps, snr, peakFreq, acousticLeak) {
   const lblAcoustic = document.getElementById('lbl-acoustic');
 
   dotThermal.className = 'fusion-dot ' + (thermalPass ? 'fail' : 'pass');
-  lblThermal.textContent = 'Thermal: ' + (deltaT !== null ? deltaT.toFixed(1) + '°C' : 'calibrating');
+  lblThermal.textContent =
+    'Thermal (device): ' + (thermalFromDevice ? 'anomaly' : 'ok')
+    + (deltaT !== null ? ' · Δ vs UI baseline ' + deltaT.toFixed(1) + '°C' : '');
 
   dotAcoustic.className = 'fusion-dot ' + (acousticLeak ? 'fail' : 'pass');
   lblAcoustic.textContent = `Acoustic: ${snr.toFixed(1)} dB @ ${(peakFreq / 1000).toFixed(1)} kHz`;
@@ -649,6 +694,31 @@ function renderFrame(temps, snr, peakFreq, acousticLeak) {
   }
   lastFrameTs = now;
   document.getElementById('f-bytes').textContent = (totalBytes / 1024).toFixed(1) + ' KB';
+
+  updateAcousticReadout(snr, peakFreq, acousticLeak, spectrum);
+}
+
+function updateAcousticReadout(snr, peakFreq, acousticLeak, spectrum) {
+  const snrEl = document.getElementById('acoustic-snr');
+  const peakLine = document.getElementById('acoustic-peak-line');
+  if (!snrEl || !peakLine) return;
+
+  const snrNum = Number.isFinite(snr) ? snr : NaN;
+  snrEl.textContent = Number.isFinite(snrNum) ? snrNum.toFixed(1) + ' dB' : '— dB';
+  snrEl.className = 'acoustic-big' + (acousticLeak ? ' leak' : '');
+
+  const pk = Number.isFinite(peakFreq) ? (peakFreq / 1000).toFixed(1) : '—';
+  let bandHint = '';
+  if (spectrum && spectrum.length === SPECTRUM_BYTES) {
+    let maxI = 0, maxV = spectrum[0];
+    for (let i = 1; i < SPECTRUM_BYTES; i++) {
+      if (spectrum[i] > maxV) { maxV = spectrum[i]; maxI = i; }
+    }
+    const fLo = 10 + (maxI / SPECTRUM_BYTES) * 39;
+    const fHi = 10 + ((maxI + 1) / SPECTRUM_BYTES) * 39;
+    bandHint = ` · strongest band ~${fLo.toFixed(0)}–${fHi.toFixed(0)} kHz`;
+  }
+  peakLine.textContent = `Peak ${pk} kHz${bandHint}`;
 }
 
 // ── Frame parser ──────────────────────────────────────────────
@@ -683,17 +753,20 @@ function processIncoming(newData) {
     const peakFreq   = dv.getFloat32(4, true);
     const flags      = rxBuf[10];
     const acousticLeak = (flags & 1) !== 0;
+    const thermalFromDevice = (flags & 2) !== 0;
+    const spectrum = new Uint8Array(SPECTRUM_BYTES);
+    spectrum.set(rxBuf.subarray(11, 11 + SPECTRUM_BYTES));
 
-    // Decode thermal pixels (bytes 11–1546)
+    const px0 = 11 + SPECTRUM_BYTES;
     const temps = new Float32Array(768);
     for (let i = 0; i < 768; i++) {
-      const lo  = rxBuf[11 + i*2];
-      const hi2 = rxBuf[11 + i*2 + 1];
+      const lo  = rxBuf[px0 + i*2];
+      const hi2 = rxBuf[px0 + i*2 + 1];
       let val = (hi2 << 8) | lo;
       if (val > 0x7FFF) val -= 0x10000;
       temps[i] = val / 10.0;
     }
-    renderFrame(temps, snr, peakFreq, acousticLeak);
+    renderFrame(temps, snr, peakFreq, acousticLeak, thermalFromDevice, spectrum);
     rxBuf = rxBuf.slice(FRAME_TOTAL);
   }
 }

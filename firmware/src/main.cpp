@@ -1,5 +1,6 @@
 #include <Arduino.h>
 #include <Wire.h>
+#include <cmath>
 #include <arm_math.h>
 #include <Adafruit_MLX90640.h>
 #include <Audio.h>
@@ -9,6 +10,12 @@
 // MLX90640: SCL→Pin19  SDA→Pin18  VDD→3.3V  VSS→GND
 // HM-10 BLE: TX1(pin0)→HM-10 RX, RX1(pin1)→HM-10 TX, VCC→3.3V, GND→GND
 //            Configure HM-10 to 115200 baud: AT+BAUD4
+//
+// ENABLE_HM10_BLE=1: binary frames on Serial1 (Web Bluetooth / thermal_viewer).
+// Default 0: USB-only — tools/ble_connect.py + web/index.html (no HM-10 required).
+#ifndef ENABLE_HM10_BLE
+#define ENABLE_HM10_BLE 0
+#endif
 
 // ── DSP Config ───────────────────────────────────────────────
 #define SAMPLE_RATE         100000
@@ -20,11 +27,12 @@
 #define SNR_THRESHOLD_DB    6.0f
 #define LEAK_CONFIRM_COUNT  3
 #define NOISE_FLOOR_ALPHA   0.05f
+#define SPECTRUM_BINS       24    // downsampled clean-spectrum bars (ultrasonic band)
 
 // ── Thermal Config ────────────────────────────────────────────
 #define DELTA_T_THRESHOLD_C  2.0f   // drop >= 2 C = thermal anomaly
-#define THERMAL_SAMPLE_MS    250    // MLX90640 at 4 Hz needs ≥250 ms between reads
-#define BASELINE_SAMPLES     20     // 10 seconds of baseline
+#define THERMAL_SAMPLE_MS    1000   // 1 Hz keeps data rate within HM-10 BLE bandwidth (~1.5 KB/s)
+#define BASELINE_SAMPLES     10     // 10 seconds of baseline at 1 Hz
 
 // ── Output ────────────────────────────────────────────────────
 #define PRINT_INTERVAL_MS    500
@@ -51,6 +59,7 @@ static int16_t   sample_buf[FFT_SIZE];
 static int       sample_count = 0;
 static arm_rfft_fast_instance_f32 fft_inst;
 static bool      noise_floor_ready = false;
+static uint8_t  spectrum_u8[SPECTRUM_BINS];
 
 // ── DSP state ─────────────────────────────────────────────────
 static float snr_db          = 0.0f;
@@ -80,10 +89,22 @@ float bandPower(float32_t* mag, int lo, int hi) {
 
 float todB(float p) { return p > 0 ? 10.0f * log10f(p) : -999.0f; }
 
+// CMSIS-DSP real FFT packs DC (real), Nyquist (real), then (Re, Im) pairs for k = 1 … N/2−1.
+static void rfftMagnitudes(const float32_t* y, float32_t* mag, int nReal) {
+    mag[0] = fabsf(y[0]);
+    for (int k = 1; k < nReal / 2; k++) {
+        float re = y[2 * k];
+        float im = y[2 * k + 1];
+        mag[k] = sqrtf(re * re + im * im);
+    }
+}
+
 // ── Setup ─────────────────────────────────────────────────────
 void setup() {
     Serial.begin(115200);
+#if ENABLE_HM10_BLE
     Serial1.begin(115200);
+#endif
     while (!Serial && millis() < 3000);
 
     Serial.println("=== PSSS Leak Detector ===");
@@ -94,6 +115,7 @@ void setup() {
     for (int i = 0; i < FFT_SIZE; i++)
         hann[i] = 0.5f * (1.0f - cosf(2.0f * PI * i / (FFT_SIZE - 1)));
     memset(noise_floor, 0, sizeof(noise_floor));
+    memset(spectrum_u8, 0, sizeof(spectrum_u8));
 
     AudioMemory(12);
     queue.begin();
@@ -108,7 +130,7 @@ void setup() {
     }
     mlx.setMode(MLX90640_CHESS);
     mlx.setResolution(MLX90640_ADC_18BIT);
-    mlx.setRefreshRate(MLX90640_4_HZ);
+    mlx.setRefreshRate(MLX90640_1_HZ);
     Serial.println("MLX90640 ready. Collecting 10s baseline — keep sensor still...");
 
     float sum = 0;
@@ -143,7 +165,7 @@ bool runAcoustic() {
         fft_input[i] = (float32_t)sample_buf[i] * hann[i];
 
     arm_rfft_fast_f32(&fft_inst, fft_input, fft_output, 0);
-    arm_cmplx_mag_f32(fft_output, magnitude, FFT_SIZE / 2);
+    rfftMagnitudes(fft_output, magnitude, FFT_SIZE);
 
     if (!noise_floor_ready) {
         memcpy(noise_floor, magnitude, sizeof(float32_t) * FFT_SIZE / 2);
@@ -176,6 +198,28 @@ bool runAcoustic() {
         confirm_count = 0;
         acoustic_leak = false;
     }
+
+    // Ultrasonic band → fixed bins for web/BLE (normalized peak per sub-band)
+    {
+        int spanBins = SIG_BIN_HIGH - SIG_BIN_LOW + 1;
+        float bandMax[SPECTRUM_BINS];
+        float gmax = 0.0f;
+        for (int b = 0; b < SPECTRUM_BINS; b++) {
+            int lo = SIG_BIN_LOW + (b * spanBins) / SPECTRUM_BINS;
+            int hi = SIG_BIN_LOW + ((b + 1) * spanBins) / SPECTRUM_BINS - 1;
+            if (hi > SIG_BIN_HIGH) hi = SIG_BIN_HIGH;
+            float mx = 0.0f;
+            for (int i = lo; i <= hi; i++)
+                if (clean[i] > mx) mx = clean[i];
+            bandMax[b] = mx;
+            if (mx > gmax) gmax = mx;
+        }
+        for (int b = 0; b < SPECTRUM_BINS; b++) {
+            spectrum_u8[b] = (gmax > 0.0f)
+                ? (uint8_t)fminf(255.0f, bandMax[b] / gmax * 255.0f)
+                : 0;
+        }
+    }
     return true;
 }
 
@@ -199,18 +243,33 @@ void runThermal() {
     delta_t         = object_temp - baseline_temp;
     thermal_anomaly = (delta_t <= -DELTA_T_THRESHOLD_C);
 
-    // Stream frame immediately — independent of acoustic pipeline
-    // Binary frame: [0xFF][0xFE] + snr_db(4B) + peak_freq(4B) + flags(1B) + thermal(1536B)
+#if ENABLE_HM10_BLE
+    // Binary on UART1 for HM-10 (optional)
     uint8_t header[2] = {0xFF, 0xFE};
     Serial1.write(header, 2);
-    Serial1.write((uint8_t*)&snr_db,   sizeof(snr_db));
+    Serial1.write((uint8_t*)&snr_db, sizeof(snr_db));
     Serial1.write((uint8_t*)&peak_freq, sizeof(peak_freq));
     uint8_t flags = (acoustic_leak ? 1u : 0u) | (thermal_anomaly ? 2u : 0u);
     Serial1.write(&flags, 1);
+    Serial1.write(spectrum_u8, sizeof(spectrum_u8));
     for (int i = 0; i < 768; i++) {
         int16_t px = (int16_t)lroundf(thermal_frame[i] * 10.0f);
         Serial1.write((uint8_t*)&px, 2);
     }
+#endif
+
+    // USB: full 32×24 grid for web/index.html heatmap (Web Serial); then $PSSS + spectrum
+    Serial.print("FRAME:");
+    for (int i = 0; i < 768; i++) {
+        if (i) Serial.print(",");
+        Serial.printf("%.2f", thermal_frame[i]);
+    }
+    Serial.print("\r\n");
+
+    bool fused = acoustic_leak && thermal_anomaly;
+    Serial.printf("$PSSS,%u,%.2f,%.0f,%.2f", fused ? 0u : 1u, snr_db, peak_freq, object_temp);
+    for (int i = 0; i < SPECTRUM_BINS; i++) Serial.printf(",%u", (unsigned)spectrum_u8[i]);
+    Serial.printf("*\r\n");
 }
 
 // ── Main loop ─────────────────────────────────────────────────

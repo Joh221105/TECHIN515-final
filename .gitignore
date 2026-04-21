@@ -5,6 +5,9 @@ firmware/.vscode/c_cpp_properties.json
 firmware/.vscode/launch.json
 firmware/.vscode/ipch
 
+# Local secrets / tokens (do not commit)
+streamlit/tokens.json
+
 # Python
 __pycache__/
 *.pyc

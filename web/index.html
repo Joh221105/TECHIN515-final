@@ -16,18 +16,46 @@
     }
 
     h1 { font-size: 1.5rem; margin-bottom: 0.25rem; }
-    .subtitle { color: #94a3b8; font-size: 0.875rem; margin-bottom: 2rem; }
+    .subtitle { color: #94a3b8; font-size: 0.875rem; margin-bottom: 1.25rem; max-width: 52rem; line-height: 1.45; }
+
+    .toolbar {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 0.75rem;
+      margin-bottom: 1.25rem;
+    }
+
+    .btn {
+      font: inherit;
+      font-size: 0.8125rem;
+      font-weight: 600;
+      padding: 0.5rem 1rem;
+      border-radius: 0.5rem;
+      border: 1px solid #334155;
+      background: #38bdf8;
+      color: #0f172a;
+      cursor: pointer;
+    }
+    .btn:hover { filter: brightness(1.05); }
+    .btn:disabled { opacity: 0.45; cursor: not-allowed; }
+    .btn.secondary {
+      background: transparent;
+      color: #e2e8f0;
+      border-color: #475569;
+    }
 
     .status-bar {
       display: flex;
       align-items: center;
       gap: 0.5rem;
-      margin-bottom: 2rem;
+      margin-bottom: 1.5rem;
       font-size: 0.875rem;
     }
 
     .dot {
-      width: 10px; height: 10px;
+      width: 10px;
+      height: 10px;
       border-radius: 50%;
       background: #ef4444;
       transition: background 0.3s;
@@ -76,6 +104,69 @@
     .card.alert .card-value { color: #f87171; }
     .card.ok .card-value { color: #34d399; }
 
+    .thermal-panel {
+      margin-bottom: 2rem;
+      padding: 1.25rem;
+      background: #1e293b;
+      border-radius: 0.75rem;
+      border: 1px solid #334155;
+    }
+    .thermal-panel h2 {
+      font-size: 0.75rem;
+      color: #94a3b8;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      margin-bottom: 0.75rem;
+    }
+    .thermal-wrap {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: stretch;
+      gap: 1rem;
+    }
+    .thermal-canvas-wrap {
+      position: relative;
+      flex: 1 1 280px;
+      min-height: 200px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      background: #0f172a;
+      border-radius: 0.5rem;
+      border: 1px solid #334155;
+      padding: 0.75rem;
+    }
+    #thermal-canvas {
+      display: block;
+      width: 100%;
+      max-width: 640px;
+      height: auto;
+      aspect-ratio: 32 / 24;
+      image-rendering: pixelated;
+      border-radius: 0.35rem;
+      background: #020617;
+    }
+    .thermal-meta {
+      font-family: ui-monospace, monospace;
+      font-size: 0.7rem;
+      color: #64748b;
+      margin-top: 0.5rem;
+    }
+    .colorbar-side {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 0.25rem;
+      padding-top: 0.25rem;
+    }
+    #colorbar-canvas {
+      width: 12px;
+      height: 160px;
+      border-radius: 0.25rem;
+      border: 1px solid #334155;
+    }
+    .cb-tick { font-family: ui-monospace, monospace; font-size: 0.62rem; color: #64748b; }
+
     .log-section h2 {
       font-size: 1rem;
       margin-bottom: 0.75rem;
@@ -102,11 +193,19 @@
 </head>
 <body>
   <h1>PSSS Leak Sensor</h1>
-  <p class="subtitle">Real-time data via BLE bridge</p>
+  <p class="subtitle">
+    Connect the Teensy over <strong>USB</strong> with <strong>Web Serial</strong> (Chrome / Edge, page served over
+    <code>http://localhost</code>). Firmware streams <code>FRAME:</code> (768 temperatures) then <code>$PSSS</code> each thermal tick (~1 Hz).
+  </p>
+
+  <div class="toolbar">
+    <button type="button" class="btn" id="btn-connect">Connect USB serial</button>
+    <button type="button" class="btn secondary" id="btn-disconnect" disabled>Disconnect</button>
+  </div>
 
   <div class="status-bar">
     <div class="dot" id="dot"></div>
-    <span id="status-text">Disconnected — run tools/ble_connect.py first</span>
+    <span id="status-text">Disconnected — choose your Teensy port (115200 baud)</span>
   </div>
 
   <div class="cards">
@@ -115,16 +214,16 @@
       <div class="card-value" id="val-status">—</div>
     </div>
     <div class="card">
-      <div class="card-label">Value 1</div>
-      <div class="card-value" id="val-1">—<span class="card-unit"></span></div>
+      <div class="card-label">SNR (dB)</div>
+      <div class="card-value" id="val-1">—<span class="card-unit">dB</span></div>
     </div>
     <div class="card">
-      <div class="card-label">Value 2</div>
-      <div class="card-value" id="val-2">—<span class="card-unit"></span></div>
+      <div class="card-label">Peak frequency</div>
+      <div class="card-value" id="val-2">—<span class="card-unit">Hz</span></div>
     </div>
     <div class="card">
-      <div class="card-label">Value 3</div>
-      <div class="card-value" id="val-3">—<span class="card-unit"></span></div>
+      <div class="card-label">Coldest pixel</div>
+      <div class="card-value" id="val-3">—<span class="card-unit">°C</span></div>
     </div>
     <div class="card">
       <div class="card-label">Last Update</div>
@@ -132,27 +231,190 @@
     </div>
   </div>
 
+  <section class="thermal-panel">
+    <h2>Thermal · MLX90640 (32×24)</h2>
+    <div class="thermal-wrap">
+      <div style="flex:1;min-width:0">
+        <div class="thermal-canvas-wrap">
+          <canvas id="thermal-canvas" width="640" height="480"></canvas>
+        </div>
+        <div class="thermal-meta" id="thermal-meta">No frame yet — connect serial and wait for data.</div>
+      </div>
+      <div class="colorbar-side">
+        <span class="cb-tick" id="cb-max">—</span>
+        <canvas id="colorbar-canvas" width="12" height="160"></canvas>
+        <span class="cb-tick" id="cb-min">—</span>
+      </div>
+    </div>
+  </section>
+
   <div class="log-section">
     <h2>Raw Log</h2>
     <div id="log"></div>
   </div>
 
   <script>
-    const WS_URL = "ws://localhost:8765";
     const MAX_LOG_LINES = 200;
+    const SPEC_BINS = 24;
+    const THERMAL_PIXELS = 768;
 
-    const dot        = document.getElementById("dot");
+    const CMAP_STOPS = [0, 0.25, 0.5, 0.75, 1];
+    const CMAP_R = [0, 0, 0, 255, 255];
+    const CMAP_G = [0, 255, 255, 255, 0];
+    const CMAP_B = [255, 255, 0, 0, 0];
+
+    let lastTemps768 = null;
+    let serialPort = null;
+    let serialReader = null;
+    let lineBuffer = "";
+    let serialDecoder = null;
+
+    const dot = document.getElementById("dot");
     const statusText = document.getElementById("status-text");
-    const log        = document.getElementById("log");
+    const log = document.getElementById("log");
+    const btnConnect = document.getElementById("btn-connect");
+    const btnDisconnect = document.getElementById("btn-disconnect");
+
+    function interp(t, xs, ys) {
+      if (t <= xs[0]) return ys[0];
+      if (t >= xs[xs.length - 1]) return ys[xs.length - 1];
+      for (let i = 0; i < xs.length - 1; i++) {
+        if (t <= xs[i + 1]) {
+          const u = (t - xs[i]) / (xs[i + 1] - xs[i]);
+          return ys[i] + u * (ys[i + 1] - ys[i]);
+        }
+      }
+      return ys[ys.length - 1];
+    }
+
+    function cmap(norm) {
+      const t = Math.max(0, Math.min(1, norm));
+      return [
+        Math.round(interp(t, CMAP_STOPS, CMAP_R)),
+        Math.round(interp(t, CMAP_STOPS, CMAP_G)),
+        Math.round(interp(t, CMAP_STOPS, CMAP_B)),
+      ];
+    }
+
+    function drawColorbar(tMin, tMax) {
+      const el = document.getElementById("colorbar-canvas");
+      if (!el) return;
+      const ctx = el.getContext("2d");
+      const w = el.width, h = el.height;
+      const img = ctx.createImageData(1, h);
+      for (let i = 0; i < h; i++) {
+        const rgb = cmap(1 - i / h);
+        const p = i * 4;
+        img.data[p] = rgb[0];
+        img.data[p + 1] = rgb[1];
+        img.data[p + 2] = rgb[2];
+        img.data[p + 3] = 255;
+      }
+      const tmp = document.createElement("canvas");
+      tmp.width = 1;
+      tmp.height = h;
+      tmp.getContext("2d").putImageData(img, 0, 0);
+      ctx.drawImage(tmp, 0, 0, w, h);
+      document.getElementById("cb-max").textContent = tMax.toFixed(1) + "°C";
+      document.getElementById("cb-min").textContent = tMin.toFixed(1) + "°C";
+    }
+
+    function drawThermalCanvas(temps) {
+      const canvas = document.getElementById("thermal-canvas");
+      const meta = document.getElementById("thermal-meta");
+      if (!canvas || !temps || temps.length !== THERMAL_PIXELS) return;
+      const ctx = canvas.getContext("2d");
+      const GW = 32, GH = 24;
+      const CW = canvas.width, CH = canvas.height;
+      const img = ctx.createImageData(CW, CH);
+      const d = img.data;
+
+      let minT = Infinity, maxT = -Infinity, sumT = 0;
+      for (let i = 0; i < THERMAL_PIXELS; i++) {
+        const v = temps[i];
+        if (v < minT) minT = v;
+        if (v > maxT) maxT = v;
+        sumT += v;
+      }
+      const avgT = sumT / THERMAL_PIXELS;
+      const pad = Math.max((maxT - minT) * 0.1, 0.5);
+      const tMin = minT - pad;
+      const tMax = maxT + pad;
+      const range = Math.max(tMax - tMin, 0.01);
+
+      for (let oy = 0; oy < CH; oy++) {
+        const sy = ((oy + 0.5) / CH) * GH - 0.5;
+        const y0 = Math.max(0, Math.floor(sy));
+        const y1 = Math.min(GH - 1, y0 + 1);
+        const ty = sy - y0;
+        for (let ox = 0; ox < CW; ox++) {
+          const sx = ((ox + 0.5) / CW) * GW - 0.5;
+          const x0 = Math.max(0, Math.floor(sx));
+          const x1 = Math.min(GW - 1, x0 + 1);
+          const tx = sx - x0;
+          const t =
+            (1 - tx) * (1 - ty) * temps[y0 * GW + x0] +
+            tx * (1 - ty) * temps[y0 * GW + x1] +
+            (1 - tx) * ty * temps[y1 * GW + x0] +
+            tx * ty * temps[y1 * GW + x1];
+          const rgb = cmap((t - tMin) / range);
+          const p = (oy * CW + ox) * 4;
+          d[p] = rgb[0];
+          d[p + 1] = rgb[1];
+          d[p + 2] = rgb[2];
+          d[p + 3] = 255;
+        }
+      }
+      ctx.putImageData(img, 0, 0);
+      drawColorbar(tMin, tMax);
+      meta.textContent =
+        `Cold ${minT.toFixed(1)} °C · Hot ${maxT.toFixed(1)} °C · Avg ${avgT.toFixed(1)} °C · span ${(maxT - minT).toFixed(2)} °C`;
+    }
 
     function addLog(text, cls = "raw") {
       const el = document.createElement("div");
       el.className = `entry ${cls}`;
       el.textContent = text;
       log.appendChild(el);
-      // Trim old lines
       while (log.children.length > MAX_LOG_LINES) log.removeChild(log.firstChild);
       log.scrollTop = log.scrollHeight;
+    }
+
+    function parseFrameLine(line) {
+      if (!line.startsWith("FRAME:")) return false;
+      const body = line.slice(6);
+      const parts = body.split(",");
+      if (parts.length !== THERMAL_PIXELS) return false;
+      const out = new Array(THERMAL_PIXELS);
+      for (let i = 0; i < THERMAL_PIXELS; i++) {
+        const v = parseFloat(parts[i]);
+        if (!Number.isFinite(v)) return false;
+        out[i] = v;
+      }
+      lastTemps768 = out;
+      return true;
+    }
+
+    function parsePsssLine(line) {
+      const trimmed = line.trim();
+      if (!trimmed.startsWith("$PSSS")) return null;
+      let s = trimmed.endsWith("*") ? trimmed.slice(0, -1) : trimmed;
+      const parts = s.split(",");
+      if (parts.length < 5 + SPEC_BINS) return null;
+      if (parts[0] !== "$PSSS") return null;
+      const status = parseInt(parts[1], 10);
+      if (status !== 0 && status !== 1) return null;
+      for (let i = 0; i < SPEC_BINS; i++) {
+        if (Number.isNaN(parseInt(parts[5 + i], 10))) return null;
+      }
+      return {
+        status,
+        value1: parseFloat(parts[2]),
+        value2: parseFloat(parts[3]),
+        value3: parseFloat(parts[4]),
+        raw: trimmed,
+        timestamp: new Date().toISOString(),
+      };
     }
 
     function updateCards(packet) {
@@ -166,42 +428,107 @@
         t.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
     }
 
-    function connect() {
-      addLog(`Connecting to ${WS_URL}...`, "sys");
-      const ws = new WebSocket(WS_URL);
-
-      ws.onopen = () => {
-        dot.classList.add("connected");
-        statusText.textContent = "Connected to bridge";
-        addLog("WebSocket connected.", "sys");
-      };
-
-      ws.onmessage = (event) => {
-        let packet;
-        try { packet = JSON.parse(event.data); } catch { return; }
-
-        if (packet.raw && !packet.status && !packet.value1) {
-          // Non-PSSS line forwarded for debug
-          addLog(packet.raw, "raw");
-        } else if (packet.value1 !== undefined) {
-          updateCards(packet);
-          addLog(packet.raw, "psss");
+    function processLine(line) {
+      if (!line) return;
+      if (line.startsWith("FRAME:")) {
+        if (!parseFrameLine(line)) addLog("[FRAME] invalid (need 768 comma-separated floats)", "sys");
+        return;
+      }
+      const packet = parsePsssLine(line);
+      if (packet) {
+        if (lastTemps768 && lastTemps768.length === THERMAL_PIXELS) {
+          drawThermalCanvas(lastTemps768);
         }
-      };
-
-      ws.onclose = () => {
-        dot.classList.remove("connected");
-        statusText.textContent = "Disconnected — retrying in 3 s...";
-        addLog("WebSocket closed. Retrying...", "sys");
-        setTimeout(connect, 3000);
-      };
-
-      ws.onerror = () => {
-        addLog("WebSocket error. Is ble_connect.py running?", "sys");
-      };
+        updateCards(packet);
+        addLog(packet.raw, "psss");
+        return;
+      }
+      if (line.length > 200) {
+        addLog(line.slice(0, 200) + "…", "raw");
+      } else {
+        addLog(line, "raw");
+      }
     }
 
-    connect();
+    async function readSerialLoop() {
+      try {
+        while (serialReader) {
+          const { value, done } = await serialReader.read();
+          if (done) break;
+          if (value && value.length && serialDecoder) {
+            lineBuffer += serialDecoder.decode(value, { stream: true });
+          }
+          let nl;
+          while ((nl = lineBuffer.indexOf("\n")) >= 0) {
+            const rawLine = lineBuffer.slice(0, nl);
+            lineBuffer = lineBuffer.slice(nl + 1);
+            processLine(rawLine.replace(/\r/g, "").trim());
+          }
+        }
+      } catch (e) {
+        if (e.name !== "AbortError") addLog("Serial read: " + e.message, "sys");
+      } finally {
+        if (serialDecoder) lineBuffer += serialDecoder.decode();
+        serialReader = null;
+        dot.classList.remove("connected");
+        statusText.textContent = "Disconnected";
+        btnConnect.disabled = false;
+        btnDisconnect.disabled = true;
+      }
+    }
+
+    async function connectSerial() {
+      if (!navigator.serial) {
+        addLog("Web Serial API not available. Use Chrome/Edge and serve this page from http://localhost.", "sys");
+        return;
+      }
+      try {
+        serialPort = await navigator.serial.requestPort();
+        await serialPort.open({ baudRate: 115200 });
+        lineBuffer = "";
+        serialDecoder = new TextDecoder();
+        serialReader = serialPort.readable.getReader();
+        dot.classList.add("connected");
+        statusText.textContent = "Connected — reading USB serial";
+        btnConnect.disabled = true;
+        btnDisconnect.disabled = false;
+        addLog("Serial port open (115200 baud).", "sys");
+        readSerialLoop();
+      } catch (e) {
+        if (e.name === "NotFoundError") {
+          addLog("No port selected.", "sys");
+        } else {
+          addLog("Connect failed: " + e.message, "sys");
+        }
+        serialPort = null;
+        serialReader = null;
+      }
+    }
+
+    async function disconnectSerial() {
+      try {
+        if (serialReader) {
+          await serialReader.cancel();
+          serialReader = null;
+        }
+        if (serialPort) {
+          await serialPort.close();
+          serialPort = null;
+        }
+      } catch (e) {
+        addLog("Disconnect: " + e.message, "sys");
+      }
+      dot.classList.remove("connected");
+      statusText.textContent = "Disconnected";
+      btnConnect.disabled = false;
+      btnDisconnect.disabled = true;
+      addLog("Serial closed.", "sys");
+    }
+
+    btnConnect.addEventListener("click", connectSerial);
+    btnDisconnect.addEventListener("click", disconnectSerial);
+
+    drawColorbar(15, 35);
   </script>
 </body>
 </html>
