@@ -1,14 +1,14 @@
 #include <Arduino.h>
 #include <Wire.h>
 #include <arm_math.h>
-#include <Adafruit_MLX90614.h>
+#include <Adafruit_MLX90640.h>
 #include <Audio.h>
 
 // ── Wiring ────────────────────────────────────────────────────
 // SPH0645: BCLK→Pin21  LRCL→Pin20  DOUT→Pin8  SEL→GND  3V→3.3V
-// MLX90614: SCL→Pin19  SDA→Pin18  VDD→3.3V  VSS→GND
-
-#define AUDIO_SAMPLE_RATE_EXACT 100000.0f
+// MLX90640: SCL→Pin19  SDA→Pin18  VDD→3.3V  VSS→GND
+// HM-10 BLE: TX1(pin0)→HM-10 RX, RX1(pin1)→HM-10 TX, VCC→3.3V, GND→GND
+//            Configure HM-10 to 115200 baud: AT+BAUD4
 
 // ── DSP Config ───────────────────────────────────────────────
 #define SAMPLE_RATE         100000
@@ -23,8 +23,8 @@
 
 // ── Thermal Config ────────────────────────────────────────────
 #define DELTA_T_THRESHOLD_C  2.0f   // drop >= 2 C = thermal anomaly
-#define THERMAL_SAMPLE_MS    250
-#define BASELINE_SAMPLES     20     // 5 seconds of baseline
+#define THERMAL_SAMPLE_MS    250    // MLX90640 at 4 Hz needs ≥250 ms between reads
+#define BASELINE_SAMPLES     20     // 10 seconds of baseline
 
 // ── Output ────────────────────────────────────────────────────
 #define PRINT_INTERVAL_MS    500
@@ -59,10 +59,10 @@ static int   confirm_count   = 0;
 static bool  acoustic_leak   = false;
 
 // ── Thermal state ─────────────────────────────────────────────
-Adafruit_MLX90614 mlx;
+Adafruit_MLX90640 mlx;
+static float thermal_frame[32 * 24];   // 768 pixels from MLX90640
 static float baseline_temp  = 0.0f;
-static float last_temp      = 0.0f;
-static float object_temp    = 0.0f;
+static float object_temp    = 0.0f;    // coldest pixel in frame
 static float delta_t        = 0.0f;
 static bool  thermal_anomaly = false;
 static unsigned long last_thermal_ms = 0;
@@ -83,6 +83,7 @@ float todB(float p) { return p > 0 ? 10.0f * log10f(p) : -999.0f; }
 // ── Setup ─────────────────────────────────────────────────────
 void setup() {
     Serial.begin(115200);
+    Serial1.begin(115200);
     while (!Serial && millis() < 3000);
 
     Serial.println("=== PSSS Leak Detector ===");
@@ -99,21 +100,28 @@ void setup() {
     Serial.println("SPH0645 ready.");
 
     Wire.begin();
-    if (!mlx.begin()) {
-        Serial.println("ERROR: MLX90614 not found — check SDA→18, SCL→19");
+    Wire.setClock(400000);
+
+    if (!mlx.begin(MLX90640_I2CADDR_DEFAULT, &Wire)) {
+        Serial.println("ERROR: MLX90640 not found — check SDA→18, SCL→19");
         while (1);
     }
-    Serial.println("MLX90614 ready. Collecting 5s baseline — keep sensor still...");
+    mlx.setMode(MLX90640_CHESS);
+    mlx.setResolution(MLX90640_ADC_18BIT);
+    mlx.setRefreshRate(MLX90640_4_HZ);
+    Serial.println("MLX90640 ready. Collecting 10s baseline — keep sensor still...");
 
     float sum = 0;
     for (int i = 0; i < BASELINE_SAMPLES; i++) {
-        sum += mlx.readObjectTempC();
+        if (mlx.getFrame(thermal_frame) != 0) { i--; continue; }
+        float min_t = thermal_frame[0];
+        for (int p = 1; p < 768; p++) if (thermal_frame[p] < min_t) min_t = thermal_frame[p];
+        sum += min_t;
         delay(THERMAL_SAMPLE_MS);
         Serial.print(".");
     }
     baseline_temp = sum / BASELINE_SAMPLES;
-    last_temp     = baseline_temp;
-    Serial.printf("\nBaseline: %.2f C\n", baseline_temp);
+    Serial.printf("\nBaseline cold-pixel: %.2f C\n", baseline_temp);
     Serial.println("\nMonitoring. Expose to ultrasonic noise + spray IPA to confirm leak.");
     Serial.println("SNR(dB) | Peak(Hz) | Acoustic | ObjTemp | DeltaT | Thermal | FUSED");
     Serial.println("---------------------------------------------------------------------");
@@ -177,10 +185,27 @@ void runThermal() {
     if (now - last_thermal_ms < THERMAL_SAMPLE_MS) return;
     last_thermal_ms = now;
 
-    object_temp     = mlx.readObjectTempC();
+    int err = mlx.getFrame(thermal_frame);
+    if (err != 0) {
+        Serial.printf("[thermal] getFrame failed: %d\n", err);
+        return;
+    }
+
+    // Use the coldest pixel — evaporative cooling from a leak shows as cold spot
+    float min_t = thermal_frame[0];
+    for (int p = 1; p < 768; p++) if (thermal_frame[p] < min_t) min_t = thermal_frame[p];
+
+    object_temp     = min_t;
     delta_t         = object_temp - baseline_temp;
-    last_temp       = object_temp;
     thermal_anomaly = (delta_t <= -DELTA_T_THRESHOLD_C);
+
+    // Stream frame immediately — independent of acoustic pipeline
+    Serial.print("FRAME:");
+    for (int i = 0; i < 768; i++) {
+        Serial.print(thermal_frame[i], 1);
+        if (i < 767) Serial.print(",");
+    }
+    Serial.println();
 }
 
 // ── Main loop ─────────────────────────────────────────────────
