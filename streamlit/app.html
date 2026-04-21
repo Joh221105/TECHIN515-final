@@ -604,20 +604,25 @@ function renderFrame(temps, snr, peakFreq, acousticLeak) {
 
   const deltaT = baselineReady ? minT - baselineAvg : null;
   const thermalPass  = deltaT !== null && deltaT <= -DELTA_T_THRESHOLD;
-  const leakConfirmed = thermalPass; // extend with acoustic when available
+  const leakConfirmed = thermalPass && acousticLeak;
 
   document.getElementById('s-cold').textContent  = minT.toFixed(1) + ' °C';
   document.getElementById('s-hot').textContent   = maxT.toFixed(1) + ' °C';
   document.getElementById('s-avg').textContent   = avgT.toFixed(1) + ' °C';
   document.getElementById('s-delta').textContent = deltaT !== null ? deltaT.toFixed(1) + ' °C' : '—';
 
-  const gate       = document.getElementById('fusion-gate');
-  const fusionStat = document.getElementById('fusion-status');
-  const dotThermal = document.getElementById('dot-thermal');
-  const lblThermal = document.getElementById('lbl-thermal');
+  const gate        = document.getElementById('fusion-gate');
+  const fusionStat  = document.getElementById('fusion-status');
+  const dotThermal  = document.getElementById('dot-thermal');
+  const lblThermal  = document.getElementById('lbl-thermal');
+  const dotAcoustic = document.getElementById('dot-acoustic');
+  const lblAcoustic = document.getElementById('lbl-acoustic');
 
   dotThermal.className = 'fusion-dot ' + (thermalPass ? 'fail' : 'pass');
   lblThermal.textContent = 'Thermal: ' + (deltaT !== null ? deltaT.toFixed(1) + '°C' : 'calibrating');
+
+  dotAcoustic.className = 'fusion-dot ' + (acousticLeak ? 'fail' : 'pass');
+  lblAcoustic.textContent = `Acoustic: ${snr.toFixed(1)} dB @ ${(peakFreq / 1000).toFixed(1)} kHz`;
 
   if (leakConfirmed) {
     gate.className        = 'fusion-gate leak';
