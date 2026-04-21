@@ -200,12 +200,17 @@ void runThermal() {
     thermal_anomaly = (delta_t <= -DELTA_T_THRESHOLD_C);
 
     // Stream frame immediately — independent of acoustic pipeline
-    Serial.print("FRAME:");
+    // Binary frame: [0xFF][0xFE] + snr_db(4B) + peak_freq(4B) + flags(1B) + thermal(1536B)
+    uint8_t header[2] = {0xFF, 0xFE};
+    Serial1.write(header, 2);
+    Serial1.write((uint8_t*)&snr_db,   sizeof(snr_db));
+    Serial1.write((uint8_t*)&peak_freq, sizeof(peak_freq));
+    uint8_t flags = (acoustic_leak ? 1u : 0u) | (thermal_anomaly ? 2u : 0u);
+    Serial1.write(&flags, 1);
     for (int i = 0; i < 768; i++) {
-        Serial.print(thermal_frame[i], 1);
-        if (i < 767) Serial.print(",");
+        int16_t px = (int16_t)(thermal_frame[i] * 10.0f);
+        Serial1.write((uint8_t*)&px, 2);
     }
-    Serial.println();
 }
 
 // ── Main loop ─────────────────────────────────────────────────
