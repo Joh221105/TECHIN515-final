@@ -1,0 +1,763 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>PSSS · Thermal</title>
+<link href="https://fonts.googleapis.com/css2?family=Space+Mono:wght@400;700&family=Syne:wght@400;700;800&display=swap" rel="stylesheet"/>
+<style>
+:root {
+  --bg:        #080b10;
+  --surface:   #0e1420;
+  --border:    #1a2235;
+  --text:      #e2e8f0;
+  --muted:     #4a5870;
+  --accent:    #00e5ff;
+  --warn:      #ff4757;
+  --ok:        #00e676;
+  --mono:      'Space Mono', monospace;
+  --sans:      'Syne', sans-serif;
+}
+
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+html, body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--sans);
+  height: 100%;
+  overflow: hidden;
+}
+
+/* ── scanline overlay ── */
+body::before {
+  content: '';
+  position: fixed; inset: 0; z-index: 999; pointer-events: none;
+  background: repeating-linear-gradient(
+    0deg,
+    transparent,
+    transparent 2px,
+    rgba(0,0,0,0.04) 2px,
+    rgba(0,0,0,0.04) 4px
+  );
+}
+
+#app {
+  display: grid;
+  grid-template-rows: 52px 1fr 110px;
+  height: 100vh;
+  padding: 0;
+}
+
+/* ── header ── */
+header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 24px;
+  border-bottom: 1px solid var(--border);
+  background: var(--surface);
+  flex-shrink: 0;
+}
+
+.logo {
+  display: flex; align-items: center; gap: 10px;
+  font-family: var(--sans); font-weight: 800; font-size: 1rem;
+  letter-spacing: 0.08em; color: var(--accent);
+  text-transform: uppercase;
+}
+.logo-dot {
+  width: 8px; height: 8px; border-radius: 50%;
+  background: var(--accent);
+  box-shadow: 0 0 8px var(--accent);
+  animation: pulse-dot 2s ease-in-out infinite;
+}
+@keyframes pulse-dot {
+  0%,100% { opacity: 1; transform: scale(1); }
+  50%      { opacity: 0.4; transform: scale(0.7); }
+}
+
+.header-right { display: flex; align-items: center; gap: 16px; }
+
+#connect-btn {
+  font-family: var(--mono);
+  font-size: 0.72rem; font-weight: 700;
+  letter-spacing: 0.06em;
+  color: var(--bg);
+  background: var(--accent);
+  border: none; border-radius: 4px;
+  padding: 7px 16px;
+  cursor: pointer;
+  text-transform: uppercase;
+  transition: opacity 0.15s, transform 0.1s;
+}
+#connect-btn:hover { opacity: 0.85; transform: translateY(-1px); }
+#connect-btn:active { transform: translateY(0); }
+#connect-btn.connected {
+  background: transparent;
+  border: 1px solid var(--warn);
+  color: var(--warn);
+}
+
+.status-pill {
+  font-family: var(--mono); font-size: 0.68rem;
+  padding: 4px 10px; border-radius: 20px;
+  border: 1px solid var(--muted); color: var(--muted);
+  transition: all 0.3s;
+}
+.status-pill.live {
+  border-color: var(--ok); color: var(--ok);
+  box-shadow: 0 0 8px rgba(0,230,118,0.2);
+}
+.status-pill.warn {
+  border-color: var(--warn); color: var(--warn);
+  box-shadow: 0 0 8px rgba(255,71,87,0.2);
+}
+
+/* ── main area ── */
+main {
+  display: grid;
+  grid-template-columns: 1fr 220px;
+  gap: 0;
+  overflow: hidden;
+  min-height: 0;
+}
+
+/* ── canvas section ── */
+.canvas-wrap {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+  background:
+    radial-gradient(ellipse at 20% 50%, rgba(0,229,255,0.03) 0%, transparent 60%),
+    var(--bg);
+  overflow: hidden;
+}
+
+.canvas-wrap::after {
+  content: '';
+  position: absolute; inset: 20px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  pointer-events: none;
+}
+
+#heatmap {
+  display: block;
+  max-width: 100%;
+  max-height: 100%;
+  image-rendering: pixelated;
+  border-radius: 4px;
+  position: relative; z-index: 1;
+}
+
+/* leak overlay label */
+#leak-label {
+  position: absolute;
+  top: 30px; left: 30px;
+  font-family: var(--mono);
+  font-size: 0.65rem; font-weight: 700;
+  letter-spacing: 0.1em;
+  color: var(--warn);
+  background: rgba(8,11,16,0.85);
+  border: 1px solid var(--warn);
+  border-radius: 3px;
+  padding: 4px 10px;
+  text-transform: uppercase;
+  display: none;
+  z-index: 2;
+  animation: blink-warn 1s step-end infinite;
+}
+@keyframes blink-warn {
+  0%,100% { opacity: 1; } 50% { opacity: 0.3; }
+}
+
+/* colorbar */
+#colorbar-wrap {
+  position: absolute;
+  right: 30px; top: 50%;
+  transform: translateY(-50%);
+  display: flex; flex-direction: column; align-items: center; gap: 4px;
+  z-index: 2;
+}
+#colorbar {
+  width: 10px; height: 160px;
+  border-radius: 2px;
+  border: 1px solid var(--border);
+}
+.cb-label {
+  font-family: var(--mono); font-size: 0.6rem; color: var(--muted);
+}
+
+/* ── sidebar ── */
+aside {
+  border-left: 1px solid var(--border);
+  background: var(--surface);
+  display: flex; flex-direction: column;
+  padding: 16px 14px;
+  gap: 14px;
+  overflow-y: auto;
+}
+
+.aside-title {
+  font-family: var(--mono); font-size: 0.6rem; font-weight: 700;
+  letter-spacing: 0.12em; color: var(--muted);
+  text-transform: uppercase;
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--border);
+}
+
+.stat-block { display: flex; flex-direction: column; gap: 8px; }
+
+.stat-row {
+  display: flex; justify-content: space-between; align-items: baseline;
+}
+.stat-key {
+  font-family: var(--mono); font-size: 0.67rem; color: var(--muted);
+}
+.stat-val {
+  font-family: var(--mono); font-size: 0.85rem; font-weight: 700; color: var(--text);
+}
+.stat-val.hot  { color: #ff6b35; }
+.stat-val.cold { color: var(--accent); }
+.stat-val.warn { color: var(--warn); }
+.stat-val.ok   { color: var(--ok); }
+
+.fusion-gate {
+  background: rgba(0,229,255,0.04);
+  border: 1px solid rgba(0,229,255,0.15);
+  border-radius: 6px;
+  padding: 10px 10px;
+  display: flex; flex-direction: column; gap: 6px;
+}
+.fusion-gate.leak {
+  background: rgba(255,71,87,0.06);
+  border-color: rgba(255,71,87,0.25);
+}
+
+.fusion-status {
+  font-family: var(--sans); font-size: 0.82rem; font-weight: 800;
+  letter-spacing: 0.04em; color: var(--ok);
+}
+.fusion-status.leak { color: var(--warn); }
+
+.fusion-row {
+  display: flex; align-items: center; gap: 6px;
+  font-family: var(--mono); font-size: 0.62rem; color: var(--muted);
+}
+.fusion-dot {
+  width: 6px; height: 6px; border-radius: 50%;
+  background: var(--muted); flex-shrink: 0;
+}
+.fusion-dot.pass { background: var(--ok); box-shadow: 0 0 4px var(--ok); }
+.fusion-dot.fail { background: var(--warn); box-shadow: 0 0 4px var(--warn); }
+
+/* frame counter */
+.frame-counter {
+  font-family: var(--mono); font-size: 0.62rem; color: var(--muted);
+  margin-top: auto;
+  padding-top: 10px;
+  border-top: 1px solid var(--border);
+}
+
+/* ── bottom bar ── */
+footer {
+  border-top: 1px solid var(--border);
+  background: var(--surface);
+  display: flex; align-items: center;
+  padding: 0 24px;
+  gap: 32px;
+  overflow: hidden;
+  flex-shrink: 0;
+}
+
+.footer-block { display: flex; flex-direction: column; gap: 3px; }
+.footer-label {
+  font-family: var(--mono); font-size: 0.58rem;
+  letter-spacing: 0.1em; color: var(--muted);
+  text-transform: uppercase;
+}
+.footer-val {
+  font-family: var(--mono); font-size: 0.82rem; font-weight: 700; color: var(--text);
+}
+
+#log-strip {
+  flex: 1;
+  font-family: var(--mono); font-size: 0.65rem; color: var(--muted);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  margin-left: auto;
+}
+
+/* ── idle overlay ── */
+#idle-overlay {
+  position: absolute; inset: 0;
+  display: flex; flex-direction: column;
+  align-items: center; justify-content: center;
+  gap: 12px;
+  background: var(--bg);
+  z-index: 10;
+  pointer-events: none;
+  transition: opacity 0.5s;
+}
+#idle-overlay.hidden { opacity: 0; pointer-events: none; }
+
+.idle-icon {
+  font-size: 2.5rem;
+  animation: float 3s ease-in-out infinite;
+}
+@keyframes float {
+  0%,100% { transform: translateY(0); }
+  50%      { transform: translateY(-8px); }
+}
+.idle-text {
+  font-family: var(--mono); font-size: 0.75rem; color: var(--muted);
+  letter-spacing: 0.08em;
+}
+
+/* scrollbar */
+::-webkit-scrollbar { width: 4px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
+</style>
+</head>
+<body>
+<div id="app">
+
+  <!-- ── Header ── -->
+  <header>
+    <div class="logo">
+      <div class="logo-dot"></div>
+      PSSS · Thermal
+    </div>
+    <div class="header-right">
+      <span class="status-pill" id="ble-status">DISCONNECTED</span>
+      <button id="connect-btn">Connect HM-10</button>
+    </div>
+  </header>
+
+  <!-- ── Main ── -->
+  <main>
+    <div class="canvas-wrap">
+      <div id="idle-overlay">
+        <div class="idle-icon">🌡</div>
+        <div class="idle-text">Connect HM-10 to begin streaming</div>
+      </div>
+
+      <canvas id="heatmap" width="320" height="240"></canvas>
+
+      <div id="leak-label">⚠ LEAK DETECTED</div>
+
+      <div id="colorbar-wrap">
+        <span class="cb-label" id="cb-max">—</span>
+        <canvas id="colorbar" width="10" height="160"></canvas>
+        <span class="cb-label" id="cb-min">—</span>
+      </div>
+    </div>
+
+    <!-- ── Sidebar ── -->
+    <aside>
+      <div class="aside-title">Thermal · MLX90640</div>
+
+      <div class="stat-block">
+        <div class="stat-row">
+          <span class="stat-key">Cold spot</span>
+          <span class="stat-val cold" id="s-cold">—</span>
+        </div>
+        <div class="stat-row">
+          <span class="stat-key">Hot spot</span>
+          <span class="stat-val hot" id="s-hot">—</span>
+        </div>
+        <div class="stat-row">
+          <span class="stat-key">Average</span>
+          <span class="stat-val" id="s-avg">—</span>
+        </div>
+        <div class="stat-row">
+          <span class="stat-key">Delta-T</span>
+          <span class="stat-val" id="s-delta">—</span>
+        </div>
+        <div class="stat-row">
+          <span class="stat-key">Baseline</span>
+          <span class="stat-val" id="s-base">calibrating…</span>
+        </div>
+      </div>
+
+      <div class="aside-title">Fusion Gate</div>
+
+      <div class="fusion-gate" id="fusion-gate">
+        <div class="fusion-status" id="fusion-status">NO LEAK</div>
+        <div class="fusion-row">
+          <div class="fusion-dot" id="dot-thermal"></div>
+          <span id="lbl-thermal">Thermal: waiting</span>
+        </div>
+        <div class="fusion-row">
+          <div class="fusion-dot" id="dot-acoustic"></div>
+          <span id="lbl-acoustic">Acoustic: N/A</span>
+        </div>
+      </div>
+
+      <div class="aside-title">Range (°C)</div>
+      <div style="display:flex;flex-direction:column;gap:6px">
+        <label style="font-family:var(--mono);font-size:0.65rem;color:var(--muted)">
+          Min <input type="number" id="r-min" value="15" step="1"
+            style="width:52px;background:var(--bg);border:1px solid var(--border);
+                   color:var(--text);border-radius:3px;padding:2px 5px;
+                   font-family:var(--mono);font-size:0.75rem;margin-left:6px"/>
+        </label>
+        <label style="font-family:var(--mono);font-size:0.65rem;color:var(--muted)">
+          Max <input type="number" id="r-max" value="35" step="1"
+            style="width:52px;background:var(--bg);border:1px solid var(--border);
+                   color:var(--text);border-radius:3px;padding:2px 5px;
+                   font-family:var(--mono);font-size:0.75rem;margin-left:6px"/>
+        </label>
+        <label style="display:flex;align-items:center;gap:6px;
+                      font-family:var(--mono);font-size:0.65rem;color:var(--muted)">
+          <input type="checkbox" id="auto-range" checked/> Auto range
+        </label>
+      </div>
+
+      <div class="frame-counter">
+        Frames received: <span id="frame-count">0</span><br/>
+        Last frame: <span id="last-frame-time">—</span>
+      </div>
+    </aside>
+  </main>
+
+  <!-- ── Footer ── -->
+  <footer>
+    <div class="footer-block">
+      <span class="footer-label">BLE Device</span>
+      <span class="footer-val" id="f-device">—</span>
+    </div>
+    <div class="footer-block">
+      <span class="footer-label">Frame Rate</span>
+      <span class="footer-val" id="f-fps">— Hz</span>
+    </div>
+    <div class="footer-block">
+      <span class="footer-label">Bytes rx</span>
+      <span class="footer-val" id="f-bytes">0</span>
+    </div>
+    <div class="footer-block">
+      <span class="footer-label">Dropped</span>
+      <span class="footer-val" id="f-dropped">0</span>
+    </div>
+    <div id="log-strip">Waiting for connection…</div>
+  </footer>
+
+</div>
+
+<script>
+'use strict';
+
+// ── BLE UUIDs (HM-10) ────────────────────────────────────────
+const BLE_SERVICE        = '0000ffe0-0000-1000-8000-00805f9b34fb';
+const BLE_CHARACTERISTIC = '0000ffe1-0000-1000-8000-00805f9b34fb';
+
+// ── Frame format ─────────────────────────────────────────────
+// Header:   0xFF 0xFE                          (2 bytes)
+// Metadata: snr_db float32 + peak_freq float32 + flags uint8  (9 bytes)
+// Body:     768 × int16_t little-endian (temp × 10)           (1536 bytes)
+// Total:    2 + 9 + 1536 = 1547 bytes
+const HEADER_A    = 0xFF;
+const HEADER_B    = 0xFE;
+const FRAME_META  = 9;
+const FRAME_BODY  = 768 * 2;
+const FRAME_TOTAL = 2 + FRAME_META + FRAME_BODY;  // 1547 bytes
+
+// ── Thermal detection ─────────────────────────────────────────
+const DELTA_T_THRESHOLD = 2.0;
+const BASELINE_FRAMES   = 10;
+
+// ── Colormap (blue → cyan → green → yellow → red) ─────────────
+const CMAP_STOPS = [0, 0.25, 0.5, 0.75, 1];
+const CMAP_R     = [0,   0,   0, 255, 255];
+const CMAP_G     = [0, 255, 255, 255,   0];
+const CMAP_B     = [255,255,   0,   0,   0];
+
+function interp(t, xs, ys) {
+  if (t <= xs[0]) return ys[0];
+  if (t >= xs[xs.length-1]) return ys[xs.length-1];
+  for (let i = 0; i < xs.length-1; i++) {
+    if (t <= xs[i+1]) {
+      const u = (t - xs[i]) / (xs[i+1] - xs[i]);
+      return ys[i] + u * (ys[i+1] - ys[i]);
+    }
+  }
+  return ys[ys.length-1];
+}
+
+function cmap(norm) {
+  const t = Math.max(0, Math.min(1, norm));
+  return [
+    Math.round(interp(t, CMAP_STOPS, CMAP_R)),
+    Math.round(interp(t, CMAP_STOPS, CMAP_G)),
+    Math.round(interp(t, CMAP_STOPS, CMAP_B)),
+  ];
+}
+
+// ── State ─────────────────────────────────────────────────────
+let rxBuf         = new Uint8Array(0);
+let frameCount    = 0;
+let droppedCount  = 0;
+let totalBytes    = 0;
+let baselineTemps = [];
+let baselineReady = false;
+let baselineAvg   = null;
+let lastFrameTs   = null;
+let fpsArr        = [];
+let bleDevice     = null;
+let bleChar       = null;
+
+// ── DOM refs ──────────────────────────────────────────────────
+const canvas      = document.getElementById('heatmap');
+const ctx         = canvas.getContext('2d');
+const cbCanvas    = document.getElementById('colorbar');
+const cbCtx       = cbCanvas.getContext('2d');
+const connectBtn  = document.getElementById('connect-btn');
+const bleStatus   = document.getElementById('ble-status');
+const idleOverlay = document.getElementById('idle-overlay');
+const leakLabel   = document.getElementById('leak-label');
+const logStrip    = document.getElementById('log-strip');
+
+// ── Colorbar ──────────────────────────────────────────────────
+function drawColorbar(tMin, tMax) {
+  const h = cbCanvas.height;
+  const img = cbCtx.createImageData(1, h);
+  for (let i = 0; i < h; i++) {
+    const rgb = cmap(1 - i/h);
+    const p = i * 4;
+    img.data[p]   = rgb[0];
+    img.data[p+1] = rgb[1];
+    img.data[p+2] = rgb[2];
+    img.data[p+3] = 255;
+  }
+  const tmp = document.createElement('canvas');
+  tmp.width = 1; tmp.height = h;
+  tmp.getContext('2d').putImageData(img, 0, 0);
+  cbCtx.drawImage(tmp, 0, 0, cbCanvas.width, h);
+  document.getElementById('cb-max').textContent = tMax.toFixed(1) + '°';
+  document.getElementById('cb-min').textContent = tMin.toFixed(1) + '°';
+}
+
+// ── Render heatmap ────────────────────────────────────────────
+function renderFrame(temps, snr, peakFreq, acousticLeak) {
+  const GW = 32, GH = 24;
+  const CW = canvas.width, CH = canvas.height;
+  const img = ctx.createImageData(CW, CH);
+  const d = img.data;
+
+  let minT = Infinity, maxT = -Infinity, sumT = 0;
+  for (let i = 0; i < 768; i++) {
+    if (temps[i] < minT) minT = temps[i];
+    if (temps[i] > maxT) maxT = temps[i];
+    sumT += temps[i];
+  }
+  const avgT = sumT / 768;
+
+  let tMin, tMax;
+  if (document.getElementById('auto-range').checked) {
+    const pad = Math.max((maxT - minT) * 0.1, 0.5);
+    tMin = minT - pad;
+    tMax = maxT + pad;
+  } else {
+    tMin = parseFloat(document.getElementById('r-min').value);
+    tMax = parseFloat(document.getElementById('r-max').value);
+  }
+  const range = Math.max(tMax - tMin, 0.01);
+
+  for (let oy = 0; oy < CH; oy++) {
+    const sy = ((oy + 0.5) / CH) * GH - 0.5;
+    const y0 = Math.max(0, Math.floor(sy));
+    const y1 = Math.min(GH-1, y0+1);
+    const ty = sy - y0;
+    for (let ox = 0; ox < CW; ox++) {
+      const sx = ((ox + 0.5) / CW) * GW - 0.5;
+      const x0 = Math.max(0, Math.floor(sx));
+      const x1 = Math.min(GW-1, x0+1);
+      const tx = sx - x0;
+      const t = (1-tx)*(1-ty)*temps[y0*GW+x0]
+              +    tx *(1-ty)*temps[y0*GW+x1]
+              + (1-tx)*   ty *temps[y1*GW+x0]
+              +    tx *   ty *temps[y1*GW+x1];
+      const rgb = cmap((t - tMin) / range);
+      const p = (oy * CW + ox) * 4;
+      d[p]   = rgb[0];
+      d[p+1] = rgb[1];
+      d[p+2] = rgb[2];
+      d[p+3] = 255;
+    }
+  }
+  ctx.putImageData(img, 0, 0);
+  drawColorbar(tMin, tMax);
+
+  // baseline calibration
+  if (!baselineReady) {
+    baselineTemps.push(minT);
+    if (baselineTemps.length >= BASELINE_FRAMES) {
+      baselineAvg = baselineTemps.reduce((a,b) => a+b, 0) / baselineTemps.length;
+      baselineReady = true;
+      document.getElementById('s-base').textContent = baselineAvg.toFixed(1) + ' °C';
+      log('Baseline established: ' + baselineAvg.toFixed(1) + ' °C');
+    }
+  }
+
+  const deltaT = baselineReady ? minT - baselineAvg : null;
+  const thermalPass  = deltaT !== null && deltaT <= -DELTA_T_THRESHOLD;
+  const leakConfirmed = thermalPass; // extend with acoustic when available
+
+  document.getElementById('s-cold').textContent  = minT.toFixed(1) + ' °C';
+  document.getElementById('s-hot').textContent   = maxT.toFixed(1) + ' °C';
+  document.getElementById('s-avg').textContent   = avgT.toFixed(1) + ' °C';
+  document.getElementById('s-delta').textContent = deltaT !== null ? deltaT.toFixed(1) + ' °C' : '—';
+
+  const gate       = document.getElementById('fusion-gate');
+  const fusionStat = document.getElementById('fusion-status');
+  const dotThermal = document.getElementById('dot-thermal');
+  const lblThermal = document.getElementById('lbl-thermal');
+
+  dotThermal.className = 'fusion-dot ' + (thermalPass ? 'fail' : 'pass');
+  lblThermal.textContent = 'Thermal: ' + (deltaT !== null ? deltaT.toFixed(1) + '°C' : 'calibrating');
+
+  if (leakConfirmed) {
+    gate.className        = 'fusion-gate leak';
+    fusionStat.className  = 'fusion-status leak';
+    fusionStat.textContent = '⚠ LEAK';
+    leakLabel.style.display = 'block';
+  } else {
+    gate.className        = 'fusion-gate';
+    fusionStat.className  = 'fusion-status';
+    fusionStat.textContent = 'NO LEAK';
+    leakLabel.style.display = 'none';
+  }
+
+  frameCount++;
+  document.getElementById('frame-count').textContent = frameCount;
+  document.getElementById('last-frame-time').textContent = new Date().toLocaleTimeString();
+
+  const now = performance.now();
+  if (lastFrameTs !== null) {
+    fpsArr.push(1000 / (now - lastFrameTs));
+    if (fpsArr.length > 8) fpsArr.shift();
+    const avgFps = fpsArr.reduce((a,b) => a+b, 0) / fpsArr.length;
+    document.getElementById('f-fps').textContent = avgFps.toFixed(1) + ' Hz';
+  }
+  lastFrameTs = now;
+  document.getElementById('f-bytes').textContent = (totalBytes / 1024).toFixed(1) + ' KB';
+}
+
+// ── Frame parser ──────────────────────────────────────────────
+function processIncoming(newData) {
+  const merged = new Uint8Array(rxBuf.length + newData.length);
+  merged.set(rxBuf);
+  merged.set(newData, rxBuf.length);
+  rxBuf = merged;
+  totalBytes += newData.length;
+
+  while (rxBuf.length >= FRAME_TOTAL) {
+    let hi = -1;
+    for (let i = 0; i <= rxBuf.length - FRAME_TOTAL; i++) {
+      if (rxBuf[i] === HEADER_A && rxBuf[i+1] === HEADER_B) { hi = i; break; }
+    }
+    if (hi === -1) {
+      rxBuf = rxBuf.slice(rxBuf.length - 1);
+      droppedCount++;
+      document.getElementById('f-dropped').textContent = droppedCount;
+      break;
+    }
+    if (hi > 0) {
+      rxBuf = rxBuf.slice(hi);
+      droppedCount++;
+      document.getElementById('f-dropped').textContent = droppedCount;
+    }
+    if (rxBuf.length < FRAME_TOTAL) break;
+
+    // Decode acoustic metadata (bytes 2–10)
+    const dv = new DataView(rxBuf.buffer, rxBuf.byteOffset + 2, FRAME_META);
+    const snr        = dv.getFloat32(0, true);
+    const peakFreq   = dv.getFloat32(4, true);
+    const flags      = rxBuf[10];
+    const acousticLeak = (flags & 1) !== 0;
+
+    // Decode thermal pixels (bytes 11–1546)
+    const temps = new Float32Array(768);
+    for (let i = 0; i < 768; i++) {
+      const lo  = rxBuf[11 + i*2];
+      const hi2 = rxBuf[11 + i*2 + 1];
+      let val = (hi2 << 8) | lo;
+      if (val > 0x7FFF) val -= 0x10000;
+      temps[i] = val / 10.0;
+    }
+    renderFrame(temps, snr, peakFreq, acousticLeak);
+    rxBuf = rxBuf.slice(FRAME_TOTAL);
+  }
+}
+
+// ── BLE connection ────────────────────────────────────────────
+function log(msg) {
+  logStrip.textContent = new Date().toLocaleTimeString() + '  ' + msg;
+  console.log(msg);
+}
+
+function setStatus(state) {
+  bleStatus.textContent = state;
+  bleStatus.className = 'status-pill';
+  if (state === 'LIVE')       bleStatus.classList.add('live');
+  else if (state === 'ERROR') bleStatus.classList.add('warn');
+}
+
+async function connect() {
+  if (bleDevice && bleDevice.gatt.connected) {
+    bleDevice.gatt.disconnect();
+    return;
+  }
+  try {
+    log('Scanning for HM-10…');
+    setStatus('SCANNING');
+
+    bleDevice = await navigator.bluetooth.requestDevice({
+      filters: [{ services: [BLE_SERVICE] }],
+      optionalServices: [BLE_SERVICE],
+    });
+
+    bleDevice.addEventListener('gattserverdisconnected', () => {
+      log('Device disconnected');
+      setStatus('DISCONNECTED');
+      connectBtn.textContent = 'Connect HM-10';
+      connectBtn.classList.remove('connected');
+      idleOverlay.classList.remove('hidden');
+    });
+
+    log('Connecting to GATT…');
+    setStatus('CONNECTING');
+    const server  = await bleDevice.gatt.connect();
+    const service = await server.getPrimaryService(BLE_SERVICE);
+    bleChar       = await service.getCharacteristic(BLE_CHARACTERISTIC);
+
+    bleChar.addEventListener('characteristicvaluechanged', e => {
+      processIncoming(new Uint8Array(e.target.value.buffer));
+    });
+    await bleChar.startNotifications();
+
+    document.getElementById('f-device').textContent = bleDevice.name || 'HM-10';
+    connectBtn.textContent = 'Disconnect';
+    connectBtn.classList.add('connected');
+    setStatus('LIVE');
+    idleOverlay.classList.add('hidden');
+    log('Connected — streaming thermal data');
+
+  } catch (err) {
+    log('Error: ' + err.message);
+    setStatus('ERROR');
+    connectBtn.textContent = 'Connect HM-10';
+    connectBtn.classList.remove('connected');
+  }
+}
+
+connectBtn.addEventListener('click', connect);
+
+// ── init colorbar ─────────────────────────────────────────────
+drawColorbar(15, 35);
+</script>
+</body>
+</html>
