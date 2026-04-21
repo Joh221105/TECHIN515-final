@@ -208,7 +208,7 @@ void runThermal() {
     uint8_t flags = (acoustic_leak ? 1u : 0u) | (thermal_anomaly ? 2u : 0u);
     Serial1.write(&flags, 1);
     for (int i = 0; i < 768; i++) {
-        int16_t px = (int16_t)(thermal_frame[i] * 10.0f);
+        int16_t px = (int16_t)lroundf(thermal_frame[i] * 10.0f);
         Serial1.write((uint8_t*)&px, 2);
     }
 }
