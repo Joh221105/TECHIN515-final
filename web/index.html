@@ -1,534 +1,605 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-  <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>PSSS Leak Sensor Dashboard</title>
-  <style>
-    * { box-sizing: border-box; margin: 0; padding: 0; }
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1.0"/>
+<title>PSSS Leak Sensor</title>
+<link href="https://fonts.googleapis.com/css2?family=Space+Mono:wght@400;700&family=Syne:wght@400;700;800&display=swap" rel="stylesheet"/>
+<style>
+:root {
+  --bg:      #080b10;
+  --surface: #0e1420;
+  --border:  #1a2235;
+  --text:    #e2e8f0;
+  --muted:   #4a5870;
+  --accent:  #00e5ff;
+  --warn:    #ff4757;
+  --ok:      #00e676;
+  --mono:    'Space Mono', monospace;
+  --sans:    'Syne', sans-serif;
+}
 
-    body {
-      font-family: system-ui, sans-serif;
-      background: #0f172a;
-      color: #e2e8f0;
-      min-height: 100vh;
-      padding: 2rem;
-    }
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
-    h1 { font-size: 1.5rem; margin-bottom: 0.25rem; }
-    .subtitle { color: #94a3b8; font-size: 0.875rem; margin-bottom: 1.25rem; max-width: 52rem; line-height: 1.45; }
+html, body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--sans);
+  height: 100%;
+  overflow: hidden;
+}
 
-    .toolbar {
-      display: flex;
-      flex-wrap: wrap;
-      align-items: center;
-      gap: 0.75rem;
-      margin-bottom: 1.25rem;
-    }
+body::before {
+  content: '';
+  position: fixed; inset: 0; z-index: 999; pointer-events: none;
+  background: repeating-linear-gradient(
+    0deg, transparent, transparent 2px,
+    rgba(0,0,0,0.04) 2px, rgba(0,0,0,0.04) 4px
+  );
+}
 
-    .btn {
-      font: inherit;
-      font-size: 0.8125rem;
-      font-weight: 600;
-      padding: 0.5rem 1rem;
-      border-radius: 0.5rem;
-      border: 1px solid #334155;
-      background: #38bdf8;
-      color: #0f172a;
-      cursor: pointer;
-    }
-    .btn:hover { filter: brightness(1.05); }
-    .btn:disabled { opacity: 0.45; cursor: not-allowed; }
-    .btn.secondary {
-      background: transparent;
-      color: #e2e8f0;
-      border-color: #475569;
-    }
+#app {
+  display: grid;
+  grid-template-rows: 64px 1fr;
+  height: 100vh;
+}
 
-    .status-bar {
-      display: flex;
-      align-items: center;
-      gap: 0.5rem;
-      margin-bottom: 1.5rem;
-      font-size: 0.875rem;
-    }
+/* ── Header ── */
+header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 24px;
+  border-bottom: 1px solid var(--border);
+  background: var(--surface);
+  flex-shrink: 0;
+}
 
-    .dot {
-      width: 10px;
-      height: 10px;
-      border-radius: 50%;
-      background: #ef4444;
-      transition: background 0.3s;
-    }
-    .dot.connected { background: #22c55e; animation: pulse 2s infinite; }
+.logo {
+  display: flex; align-items: center; gap: 12px;
+  font-family: var(--sans); font-weight: 800; font-size: 1.15rem;
+  letter-spacing: 0.08em; color: var(--accent);
+  text-transform: uppercase;
+}
+.logo-dot {
+  width: 10px; height: 10px; border-radius: 50%;
+  background: var(--muted);
+  transition: background 0.3s, box-shadow 0.3s;
+}
+.logo-dot.connected {
+  background: var(--ok);
+  box-shadow: 0 0 8px var(--ok);
+  animation: pulse-dot 2s ease-in-out infinite;
+}
+@keyframes pulse-dot {
+  0%,100% { opacity: 1; transform: scale(1); }
+  50%      { opacity: 0.4; transform: scale(0.7); }
+}
 
-    @keyframes pulse {
-      0%, 100% { opacity: 1; }
-      50% { opacity: 0.4; }
-    }
+.header-right { display: flex; align-items: center; gap: 10px; }
 
-    .cards {
-      display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
-      gap: 1rem;
-      margin-bottom: 2rem;
-    }
+.btn {
+  font-family: var(--mono);
+  font-size: 0.8rem; font-weight: 700;
+  letter-spacing: 0.06em;
+  border: none; border-radius: 4px;
+  padding: 8px 18px;
+  cursor: pointer;
+  text-transform: uppercase;
+  transition: opacity 0.15s, transform 0.1s;
+}
+.btn:hover:not(:disabled) { opacity: 0.85; transform: translateY(-1px); }
+.btn:active { transform: translateY(0); }
+.btn:disabled { opacity: 0.35; cursor: not-allowed; }
 
-    .card {
-      background: #1e293b;
-      border-radius: 0.75rem;
-      padding: 1.25rem;
-      border: 1px solid #334155;
-    }
+.btn-connect    { background: var(--accent); color: var(--bg); }
+.btn-disconnect { background: transparent; border: 1px solid var(--warn); color: var(--warn); }
 
-    .card-label {
-      font-size: 0.75rem;
-      color: #94a3b8;
-      text-transform: uppercase;
-      letter-spacing: 0.05em;
-      margin-bottom: 0.5rem;
-    }
+.status-text {
+  font-family: var(--mono); font-size: 0.78rem; color: var(--muted);
+}
 
-    .card-value {
-      font-size: 2rem;
-      font-weight: 700;
-      font-variant-numeric: tabular-nums;
-    }
+/* ── Main layout ── */
+main {
+  display: grid;
+  grid-template-columns: 1fr 300px;
+  overflow: hidden;
+  min-height: 0;
+}
 
-    .card-unit {
-      font-size: 0.875rem;
-      color: #94a3b8;
-      margin-left: 0.25rem;
-    }
+/* ── Heatmap ── */
+.canvas-wrap {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+  background:
+    radial-gradient(ellipse at 20% 50%, rgba(0,229,255,0.03) 0%, transparent 60%),
+    var(--bg);
+  overflow: hidden;
+}
+.canvas-wrap::after {
+  content: '';
+  position: absolute; inset: 20px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  pointer-events: none;
+}
 
-    .card.alert .card-value { color: #f87171; }
-    .card.ok .card-value { color: #34d399; }
+#thermal-canvas {
+  display: block;
+  max-width: 100%;
+  max-height: 100%;
+  image-rendering: pixelated;
+  border-radius: 4px;
+  position: relative; z-index: 1;
+}
 
-    .thermal-panel {
-      margin-bottom: 2rem;
-      padding: 1.25rem;
-      background: #1e293b;
-      border-radius: 0.75rem;
-      border: 1px solid #334155;
-    }
-    .thermal-panel h2 {
-      font-size: 0.75rem;
-      color: #94a3b8;
-      text-transform: uppercase;
-      letter-spacing: 0.08em;
-      margin-bottom: 0.75rem;
-    }
-    .thermal-wrap {
-      display: flex;
-      flex-wrap: wrap;
-      align-items: stretch;
-      gap: 1rem;
-    }
-    .thermal-canvas-wrap {
-      position: relative;
-      flex: 1 1 280px;
-      min-height: 200px;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      background: #0f172a;
-      border-radius: 0.5rem;
-      border: 1px solid #334155;
-      padding: 0.75rem;
-    }
-    #thermal-canvas {
-      display: block;
-      width: 100%;
-      max-width: 640px;
-      height: auto;
-      aspect-ratio: 32 / 24;
-      image-rendering: pixelated;
-      border-radius: 0.35rem;
-      background: #020617;
-    }
-    .thermal-meta {
-      font-family: ui-monospace, monospace;
-      font-size: 0.7rem;
-      color: #64748b;
-      margin-top: 0.5rem;
-    }
-    .colorbar-side {
-      display: flex;
-      flex-direction: column;
-      align-items: center;
-      gap: 0.25rem;
-      padding-top: 0.25rem;
-    }
-    #colorbar-canvas {
-      width: 12px;
-      height: 160px;
-      border-radius: 0.25rem;
-      border: 1px solid #334155;
-    }
-    .cb-tick { font-family: ui-monospace, monospace; font-size: 0.62rem; color: #64748b; }
+/* Colorbar */
+#colorbar-wrap {
+  position: absolute;
+  right: 30px; top: 50%;
+  transform: translateY(-50%);
+  display: flex; flex-direction: column; align-items: center; gap: 4px;
+  z-index: 2;
+}
+#colorbar-canvas { width: 12px; height: 180px; border-radius: 2px; border: 1px solid var(--border); }
+.cb-label { font-family: var(--mono); font-size: 0.72rem; color: var(--muted); }
 
-    .log-section h2 {
-      font-size: 1rem;
-      margin-bottom: 0.75rem;
-      color: #94a3b8;
-    }
+/* Idle overlay */
+#idle-overlay {
+  position: absolute; inset: 0;
+  display: flex; flex-direction: column;
+  align-items: center; justify-content: center;
+  gap: 12px;
+  background: var(--bg);
+  z-index: 10;
+  transition: opacity 0.5s;
+}
+#idle-overlay.hidden { opacity: 0; pointer-events: none; }
+.idle-icon { font-size: 2.5rem; animation: float 3s ease-in-out infinite; }
+@keyframes float {
+  0%,100% { transform: translateY(0); }
+  50%      { transform: translateY(-8px); }
+}
+.idle-text { font-family: var(--mono); font-size: 0.9rem; color: var(--muted); letter-spacing: 0.08em; }
 
-    #log {
-      background: #0f172a;
-      border: 1px solid #334155;
-      border-radius: 0.5rem;
-      padding: 1rem;
-      height: 260px;
-      overflow-y: auto;
-      font-family: monospace;
-      font-size: 0.8rem;
-      color: #64748b;
-    }
+/* ── Right panel ── */
+.right-panel {
+  display: flex;
+  flex-direction: column;
+  border-left: 1px solid var(--border);
+  background: var(--surface);
+  overflow: hidden;
+}
 
-    #log .entry { margin-bottom: 0.25rem; }
-    #log .entry.psss { color: #7dd3fc; }
-    #log .entry.raw  { color: #475569; }
-    #log .entry.sys  { color: #a78bfa; }
-  </style>
+/* ── Leak status ── */
+.leak-section {
+  flex: 0 0 auto;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 28px 24px;
+  gap: 14px;
+  border-bottom: 1px solid var(--border);
+}
+
+.section-label {
+  font-family: var(--mono); font-size: 0.72rem; font-weight: 700;
+  letter-spacing: 0.14em; color: var(--muted); text-transform: uppercase;
+  align-self: flex-start;
+}
+
+.leak-badge {
+  width: 100%;
+  padding: 18px 10px;
+  border-radius: 8px;
+  border: 2px solid var(--ok);
+  background: rgba(0,230,118,0.06);
+  display: flex; flex-direction: column;
+  align-items: center; justify-content: center;
+  gap: 4px;
+  transition: border-color 0.3s, background 0.3s;
+}
+.leak-badge.leak {
+  border-color: var(--warn);
+  background: rgba(255,71,87,0.08);
+  animation: blink-badge 0.9s step-end infinite;
+}
+@keyframes blink-badge {
+  0%,100% { opacity: 1; } 50% { opacity: 0.55; }
+}
+
+.leak-icon { font-size: 2.2rem; line-height: 1; }
+.leak-text {
+  font-family: var(--sans); font-size: 1.35rem; font-weight: 800;
+  letter-spacing: 0.06em; color: var(--ok); text-transform: uppercase;
+}
+.leak-badge.leak .leak-text { color: var(--warn); }
+
+/* ── Mic / acoustic section ── */
+.mic-section {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  padding: 24px;
+  gap: 16px;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.snr-row {
+  display: flex; align-items: baseline; gap: 8px;
+}
+.snr-number {
+  font-family: var(--mono); font-size: 2.4rem; font-weight: 700;
+  color: var(--text); letter-spacing: -0.02em;
+  transition: color 0.3s;
+}
+.snr-number.leak { color: var(--warn); }
+.snr-unit { font-family: var(--mono); font-size: 0.8rem; color: var(--muted); }
+
+.spectrum-wrap {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-height: 0;
+}
+.spectrum-bars {
+  flex: 1;
+  display: flex;
+  align-items: flex-end;
+  gap: 3px;
+  min-height: 0;
+}
+.spec-bar {
+  flex: 1;
+  border-radius: 2px 2px 0 0;
+  background: var(--border);
+  min-height: 2px;
+  transition: height 0.12s ease-out, background 0.2s;
+}
+.spec-bar.active      { background: var(--accent); box-shadow: 0 0 4px rgba(0,229,255,0.4); }
+.spec-bar.active.leak { background: var(--warn);   box-shadow: 0 0 4px rgba(255,71,87,0.4); }
+
+.spectrum-footer {
+  display: flex; justify-content: space-between;
+  font-family: var(--mono); font-size: 0.7rem; color: var(--muted);
+}
+
+.snr-threshold {
+  display: flex; align-items: center; gap: 8px;
+  font-family: var(--mono); font-size: 0.75rem; color: var(--muted);
+}
+.threshold-pip { width: 10px; height: 2px; background: var(--warn); border-radius: 1px; }
+
+/* scrollbar */
+::-webkit-scrollbar { width: 4px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
+</style>
 </head>
 <body>
-  <h1>PSSS Leak Sensor</h1>
-  <p class="subtitle">
-    Connect the Teensy over <strong>USB</strong> with <strong>Web Serial</strong> (Chrome / Edge, page served over
-    <code>http://localhost</code>). Firmware streams <code>FRAME:</code> (768 temperatures) then <code>$PSSS</code> each thermal tick (~1 Hz).
-  </p>
+<div id="app">
 
-  <div class="toolbar">
-    <button type="button" class="btn" id="btn-connect">Connect USB serial</button>
-    <button type="button" class="btn secondary" id="btn-disconnect" disabled>Disconnect</button>
-  </div>
+  <!-- Header -->
+  <header>
+    <div class="logo">
+      <div class="logo-dot" id="logo-dot"></div>
+      PSSS
+    </div>
+    <div class="header-right">
+      <span class="status-text" id="status-text">Disconnected</span>
+      <button type="button" class="btn btn-connect" id="btn-connect">Connect USB</button>
+      <button type="button" class="btn btn-disconnect" id="btn-disconnect" disabled>Disconnect</button>
+    </div>
+  </header>
 
-  <div class="status-bar">
-    <div class="dot" id="dot"></div>
-    <span id="status-text">Disconnected — choose your Teensy port (115200 baud)</span>
-  </div>
+  <!-- Main -->
+  <main>
+    <!-- Heatmap -->
+    <div class="canvas-wrap">
+      <div id="idle-overlay">
+        <div class="idle-text">Connect Teensy over USB to begin streaming</div>
+      </div>
+      <canvas id="thermal-canvas" width="640" height="480"></canvas>
+      <div id="colorbar-wrap">
+        <span class="cb-label" id="cb-max">—</span>
+        <canvas id="colorbar-canvas" width="10" height="160"></canvas>
+        <span class="cb-label" id="cb-min">—</span>
+      </div>
+    </div>
 
-  <div class="cards">
-    <div class="card" id="card-status">
-      <div class="card-label">Sensor Status</div>
-      <div class="card-value" id="val-status">—</div>
-    </div>
-    <div class="card">
-      <div class="card-label">SNR (dB)</div>
-      <div class="card-value" id="val-1">—<span class="card-unit">dB</span></div>
-    </div>
-    <div class="card">
-      <div class="card-label">Peak frequency</div>
-      <div class="card-value" id="val-2">—<span class="card-unit">Hz</span></div>
-    </div>
-    <div class="card">
-      <div class="card-label">Coldest pixel</div>
-      <div class="card-value" id="val-3">—<span class="card-unit">°C</span></div>
-    </div>
-    <div class="card">
-      <div class="card-label">Last Update</div>
-      <div class="card-value" id="val-time" style="font-size:1rem;padding-top:0.5rem;">—</div>
-    </div>
-  </div>
+    <!-- Right panel -->
+    <div class="right-panel">
 
-  <section class="thermal-panel">
-    <h2>Thermal · MLX90640 (32×24)</h2>
-    <div class="thermal-wrap">
-      <div style="flex:1;min-width:0">
-        <div class="thermal-canvas-wrap">
-          <canvas id="thermal-canvas" width="640" height="480"></canvas>
+      <!-- Leak detection -->
+      <div class="leak-section">
+        <span class="section-label">Detection</span>
+        <div class="leak-badge" id="leak-badge">
+          <div class="leak-icon" id="leak-icon">✓</div>
+          <div class="leak-text" id="leak-text">NO LEAK</div>
         </div>
-        <div class="thermal-meta" id="thermal-meta">No frame yet — connect serial and wait for data.</div>
       </div>
-      <div class="colorbar-side">
-        <span class="cb-tick" id="cb-max">—</span>
-        <canvas id="colorbar-canvas" width="12" height="160"></canvas>
-        <span class="cb-tick" id="cb-min">—</span>
+
+      <!-- Microphone -->
+      <div class="mic-section">
+        <span class="section-label">Microphone</span>
+        <div class="snr-row">
+          <span class="snr-number" id="snr-number">—</span>
+          <span class="snr-unit">dB SNR</span>
+        </div>
+        <div class="snr-threshold">
+          <div class="threshold-pip"></div>
+          Threshold: 6 dB
+        </div>
+        <div class="spectrum-wrap">
+          <div class="spectrum-bars" id="spectrum-bars"></div>
+          <div class="spectrum-footer">
+            <span>10 kHz</span><span>49 kHz</span>
+          </div>
+        </div>
       </div>
+
     </div>
-  </section>
+  </main>
 
-  <div class="log-section">
-    <h2>Raw Log</h2>
-    <div id="log"></div>
-  </div>
+</div>
+<script>
+'use strict';
 
-  <script>
-    const MAX_LOG_LINES = 200;
-    const SPEC_BINS = 24;
-    const THERMAL_PIXELS = 768;
+const SPEC_BINS      = 24;
+const THERMAL_PIXELS = 768;
 
-    const CMAP_STOPS = [0, 0.25, 0.5, 0.75, 1];
-    const CMAP_R = [0, 0, 0, 255, 255];
-    const CMAP_G = [0, 255, 255, 255, 0];
-    const CMAP_B = [255, 255, 0, 0, 0];
+const CMAP_STOPS = [0, 0.25, 0.5, 0.75, 1];
+const CMAP_R     = [0,   0,   0, 255, 255];
+const CMAP_G     = [0, 255, 255, 255,   0];
+const CMAP_B     = [255,255,   0,   0,   0];
 
-    let lastTemps768 = null;
-    let serialPort = null;
-    let serialReader = null;
-    let lineBuffer = "";
-    let serialDecoder = null;
+let lastTemps768 = null;
+let serialPort   = null;
+let serialReader = null;
+let lineBuffer   = '';
+let serialDecoder = null;
 
-    const dot = document.getElementById("dot");
-    const statusText = document.getElementById("status-text");
-    const log = document.getElementById("log");
-    const btnConnect = document.getElementById("btn-connect");
-    const btnDisconnect = document.getElementById("btn-disconnect");
+// DOM
+const logoDot      = document.getElementById('logo-dot');
+const statusText   = document.getElementById('status-text');
+const btnConnect   = document.getElementById('btn-connect');
+const btnDisconnect = document.getElementById('btn-disconnect');
+const idleOverlay  = document.getElementById('idle-overlay');
+const leakBadge    = document.getElementById('leak-badge');
+const leakIcon     = document.getElementById('leak-icon');
+const leakText     = document.getElementById('leak-text');
+const snrNumber    = document.getElementById('snr-number');
 
-    function interp(t, xs, ys) {
-      if (t <= xs[0]) return ys[0];
-      if (t >= xs[xs.length - 1]) return ys[xs.length - 1];
-      for (let i = 0; i < xs.length - 1; i++) {
-        if (t <= xs[i + 1]) {
-          const u = (t - xs[i]) / (xs[i + 1] - xs[i]);
-          return ys[i] + u * (ys[i + 1] - ys[i]);
-        }
-      }
-      return ys[ys.length - 1];
+// Build 24 spectrum bars
+const specBarsEl = document.getElementById('spectrum-bars');
+const specBars = Array.from({ length: SPEC_BINS }, () => {
+  const b = document.createElement('div');
+  b.className = 'spec-bar';
+  specBarsEl.appendChild(b);
+  return b;
+});
+
+function updateSpectrum(spectrum, acousticAlert) {
+  const containerH = specBarsEl.clientHeight || 100;
+  specBars.forEach((b, i) => {
+    const val = spectrum ? spectrum[i] : 0;
+    const h = Math.max(2, (val / 255) * containerH);
+    b.style.height = h + 'px';
+    b.className = val > 20
+      ? ('spec-bar active' + (acousticAlert ? ' leak' : ''))
+      : 'spec-bar';
+  });
+}
+
+function interp(t, xs, ys) {
+  if (t <= xs[0]) return ys[0];
+  if (t >= xs[xs.length-1]) return ys[xs.length-1];
+  for (let i = 0; i < xs.length-1; i++) {
+    if (t <= xs[i+1]) {
+      const u = (t - xs[i]) / (xs[i+1] - xs[i]);
+      return ys[i] + u * (ys[i+1] - ys[i]);
     }
+  }
+  return ys[ys.length-1];
+}
 
-    function cmap(norm) {
-      const t = Math.max(0, Math.min(1, norm));
-      return [
-        Math.round(interp(t, CMAP_STOPS, CMAP_R)),
-        Math.round(interp(t, CMAP_STOPS, CMAP_G)),
-        Math.round(interp(t, CMAP_STOPS, CMAP_B)),
-      ];
+function cmap(norm) {
+  const t = Math.max(0, Math.min(1, norm));
+  return [
+    Math.round(interp(t, CMAP_STOPS, CMAP_R)),
+    Math.round(interp(t, CMAP_STOPS, CMAP_G)),
+    Math.round(interp(t, CMAP_STOPS, CMAP_B)),
+  ];
+}
+
+function drawColorbar(tMin, tMax) {
+  const el = document.getElementById('colorbar-canvas');
+  const ctx = el.getContext('2d');
+  const h = el.height;
+  const img = ctx.createImageData(1, h);
+  for (let i = 0; i < h; i++) {
+    const rgb = cmap(1 - i / h);
+    const p = i * 4;
+    img.data[p] = rgb[0]; img.data[p+1] = rgb[1]; img.data[p+2] = rgb[2]; img.data[p+3] = 255;
+  }
+  const tmp = document.createElement('canvas');
+  tmp.width = 1; tmp.height = h;
+  tmp.getContext('2d').putImageData(img, 0, 0);
+  ctx.drawImage(tmp, 0, 0, el.width, h);
+  document.getElementById('cb-max').textContent = tMax.toFixed(1) + '°C';
+  document.getElementById('cb-min').textContent = tMin.toFixed(1) + '°C';
+}
+
+function drawThermalCanvas(temps) {
+  const canvas = document.getElementById('thermal-canvas');
+  if (!canvas || !temps || temps.length !== THERMAL_PIXELS) return;
+  const ctx = canvas.getContext('2d');
+  const GW = 32, GH = 24;
+  const CW = canvas.width, CH = canvas.height;
+  const img = ctx.createImageData(CW, CH);
+  const d = img.data;
+
+  let minT = Infinity, maxT = -Infinity;
+  for (let i = 0; i < THERMAL_PIXELS; i++) {
+    if (temps[i] < minT) minT = temps[i];
+    if (temps[i] > maxT) maxT = temps[i];
+  }
+  const pad = Math.max((maxT - minT) * 0.1, 0.5);
+  const tMin = minT - pad, tMax = maxT + pad;
+  const range = Math.max(tMax - tMin, 0.01);
+
+  for (let oy = 0; oy < CH; oy++) {
+    const sy = ((oy + 0.5) / CH) * GH - 0.5;
+    const y0 = Math.max(0, Math.floor(sy)), y1 = Math.min(GH-1, y0+1);
+    const ty = sy - y0;
+    for (let ox = 0; ox < CW; ox++) {
+      const sx = ((ox + 0.5) / CW) * GW - 0.5;
+      const x0 = Math.max(0, Math.floor(sx)), x1 = Math.min(GW-1, x0+1);
+      const tx = sx - x0;
+      const t = (1-tx)*(1-ty)*temps[y0*GW+x0] + tx*(1-ty)*temps[y0*GW+x1]
+              + (1-tx)*ty*temps[y1*GW+x0]     + tx*ty*temps[y1*GW+x1];
+      const rgb = cmap((t - tMin) / range);
+      const p = (oy * CW + ox) * 4;
+      d[p] = rgb[0]; d[p+1] = rgb[1]; d[p+2] = rgb[2]; d[p+3] = 255;
     }
+  }
+  ctx.putImageData(img, 0, 0);
+  drawColorbar(tMin, tMax);
+  idleOverlay.classList.add('hidden');
+}
 
-    function drawColorbar(tMin, tMax) {
-      const el = document.getElementById("colorbar-canvas");
-      if (!el) return;
-      const ctx = el.getContext("2d");
-      const w = el.width, h = el.height;
-      const img = ctx.createImageData(1, h);
-      for (let i = 0; i < h; i++) {
-        const rgb = cmap(1 - i / h);
-        const p = i * 4;
-        img.data[p] = rgb[0];
-        img.data[p + 1] = rgb[1];
-        img.data[p + 2] = rgb[2];
-        img.data[p + 3] = 255;
-      }
-      const tmp = document.createElement("canvas");
-      tmp.width = 1;
-      tmp.height = h;
-      tmp.getContext("2d").putImageData(img, 0, 0);
-      ctx.drawImage(tmp, 0, 0, w, h);
-      document.getElementById("cb-max").textContent = tMax.toFixed(1) + "°C";
-      document.getElementById("cb-min").textContent = tMin.toFixed(1) + "°C";
-    }
+function parseFrameLine(line) {
+  if (!line.startsWith('FRAME:')) return false;
+  const parts = line.slice(6).split(',');
+  if (parts.length !== THERMAL_PIXELS) return false;
+  const out = new Array(THERMAL_PIXELS);
+  for (let i = 0; i < THERMAL_PIXELS; i++) {
+    const v = parseFloat(parts[i]);
+    if (!Number.isFinite(v)) return false;
+    out[i] = v;
+  }
+  lastTemps768 = out;
+  return true;
+}
 
-    function drawThermalCanvas(temps) {
-      const canvas = document.getElementById("thermal-canvas");
-      const meta = document.getElementById("thermal-meta");
-      if (!canvas || !temps || temps.length !== THERMAL_PIXELS) return;
-      const ctx = canvas.getContext("2d");
-      const GW = 32, GH = 24;
-      const CW = canvas.width, CH = canvas.height;
-      const img = ctx.createImageData(CW, CH);
-      const d = img.data;
+// $PSSS,status,snr_db,peak_freq,obj_temp,spec[0],...,spec[23]*
+function parsePsssLine(line) {
+  const s = line.trim().replace(/\*$/, '');
+  if (!s.startsWith('$PSSS,')) return null;
+  const parts = s.split(',');
+  if (parts.length < 5 + SPEC_BINS) return null;
+  const status = parseInt(parts[1], 10);   // 0 = leak alert, 1 = ok
+  const snr    = parseFloat(parts[2]);
+  const spectrum = new Array(SPEC_BINS);
+  for (let i = 0; i < SPEC_BINS; i++) {
+    spectrum[i] = parseInt(parts[5 + i], 10);
+    if (Number.isNaN(spectrum[i])) return null;
+  }
+  return { status, snr, spectrum };
+}
 
-      let minT = Infinity, maxT = -Infinity, sumT = 0;
-      for (let i = 0; i < THERMAL_PIXELS; i++) {
-        const v = temps[i];
-        if (v < minT) minT = v;
-        if (v > maxT) maxT = v;
-        sumT += v;
-      }
-      const avgT = sumT / THERMAL_PIXELS;
-      const pad = Math.max((maxT - minT) * 0.1, 0.5);
-      const tMin = minT - pad;
-      const tMax = maxT + pad;
-      const range = Math.max(tMax - tMin, 0.01);
+function updateUI(packet) {
+  const isLeak = packet.status === 0;
+  const acousticAlert = packet.snr >= 6;
 
-      for (let oy = 0; oy < CH; oy++) {
-        const sy = ((oy + 0.5) / CH) * GH - 0.5;
-        const y0 = Math.max(0, Math.floor(sy));
-        const y1 = Math.min(GH - 1, y0 + 1);
-        const ty = sy - y0;
-        for (let ox = 0; ox < CW; ox++) {
-          const sx = ((ox + 0.5) / CW) * GW - 0.5;
-          const x0 = Math.max(0, Math.floor(sx));
-          const x1 = Math.min(GW - 1, x0 + 1);
-          const tx = sx - x0;
-          const t =
-            (1 - tx) * (1 - ty) * temps[y0 * GW + x0] +
-            tx * (1 - ty) * temps[y0 * GW + x1] +
-            (1 - tx) * ty * temps[y1 * GW + x0] +
-            tx * ty * temps[y1 * GW + x1];
-          const rgb = cmap((t - tMin) / range);
-          const p = (oy * CW + ox) * 4;
-          d[p] = rgb[0];
-          d[p + 1] = rgb[1];
-          d[p + 2] = rgb[2];
-          d[p + 3] = 255;
-        }
-      }
-      ctx.putImageData(img, 0, 0);
-      drawColorbar(tMin, tMax);
-      meta.textContent =
-        `Cold ${minT.toFixed(1)} °C · Hot ${maxT.toFixed(1)} °C · Avg ${avgT.toFixed(1)} °C · span ${(maxT - minT).toFixed(2)} °C`;
-    }
+  if (isLeak) {
+    leakBadge.className = 'leak-badge leak';
+    leakIcon.textContent = '⚠';
+    leakText.textContent = 'LEAK';
+  } else {
+    leakBadge.className = 'leak-badge';
+    leakIcon.textContent = '✓';
+    leakText.textContent = 'NO LEAK';
+  }
 
-    function addLog(text, cls = "raw") {
-      const el = document.createElement("div");
-      el.className = `entry ${cls}`;
-      el.textContent = text;
-      log.appendChild(el);
-      while (log.children.length > MAX_LOG_LINES) log.removeChild(log.firstChild);
-      log.scrollTop = log.scrollHeight;
-    }
+  snrNumber.textContent = Number.isFinite(packet.snr) ? packet.snr.toFixed(1) : '—';
+  snrNumber.className = 'snr-number' + (acousticAlert ? ' leak' : '');
 
-    function parseFrameLine(line) {
-      if (!line.startsWith("FRAME:")) return false;
-      const body = line.slice(6);
-      const parts = body.split(",");
-      if (parts.length !== THERMAL_PIXELS) return false;
-      const out = new Array(THERMAL_PIXELS);
-      for (let i = 0; i < THERMAL_PIXELS; i++) {
-        const v = parseFloat(parts[i]);
-        if (!Number.isFinite(v)) return false;
-        out[i] = v;
-      }
-      lastTemps768 = out;
-      return true;
-    }
+  updateSpectrum(packet.spectrum, acousticAlert);
 
-    function parsePsssLine(line) {
-      const trimmed = line.trim();
-      if (!trimmed.startsWith("$PSSS")) return null;
-      let s = trimmed.endsWith("*") ? trimmed.slice(0, -1) : trimmed;
-      const parts = s.split(",");
-      if (parts.length < 5 + SPEC_BINS) return null;
-      if (parts[0] !== "$PSSS") return null;
-      const status = parseInt(parts[1], 10);
-      if (status !== 0 && status !== 1) return null;
-      for (let i = 0; i < SPEC_BINS; i++) {
-        if (Number.isNaN(parseInt(parts[5 + i], 10))) return null;
-      }
-      return {
-        status,
-        value1: parseFloat(parts[2]),
-        value2: parseFloat(parts[3]),
-        value3: parseFloat(parts[4]),
-        raw: trimmed,
-        timestamp: new Date().toISOString(),
-      };
-    }
+  if (lastTemps768) drawThermalCanvas(lastTemps768);
+}
 
-    function updateCards(packet) {
-      document.getElementById("val-status").textContent = packet.status === 1 ? "OK" : "ALERT";
-      document.getElementById("card-status").className = "card " + (packet.status === 1 ? "ok" : "alert");
-      document.getElementById("val-1").childNodes[0].textContent = packet.value1.toFixed(2);
-      document.getElementById("val-2").childNodes[0].textContent = packet.value2.toFixed(0);
-      document.getElementById("val-3").childNodes[0].textContent = packet.value3.toFixed(2);
-      const t = new Date(packet.timestamp);
-      document.getElementById("val-time").textContent =
-        t.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
-    }
+function processLine(line) {
+  if (!line) return;
+  if (line.startsWith('FRAME:')) { parseFrameLine(line); return; }
+  const packet = parsePsssLine(line);
+  if (packet) updateUI(packet);
+}
 
-    function processLine(line) {
-      if (!line) return;
-      if (line.startsWith("FRAME:")) {
-        if (!parseFrameLine(line)) addLog("[FRAME] invalid (need 768 comma-separated floats)", "sys");
-        return;
-      }
-      const packet = parsePsssLine(line);
-      if (packet) {
-        if (lastTemps768 && lastTemps768.length === THERMAL_PIXELS) {
-          drawThermalCanvas(lastTemps768);
-        }
-        updateCards(packet);
-        addLog(packet.raw, "psss");
-        return;
-      }
-      if (line.length > 200) {
-        addLog(line.slice(0, 200) + "…", "raw");
-      } else {
-        addLog(line, "raw");
-      }
-    }
-
-    async function readSerialLoop() {
-      try {
-        while (serialReader) {
-          const { value, done } = await serialReader.read();
-          if (done) break;
-          if (value && value.length && serialDecoder) {
-            lineBuffer += serialDecoder.decode(value, { stream: true });
-          }
-          let nl;
-          while ((nl = lineBuffer.indexOf("\n")) >= 0) {
-            const rawLine = lineBuffer.slice(0, nl);
-            lineBuffer = lineBuffer.slice(nl + 1);
-            processLine(rawLine.replace(/\r/g, "").trim());
-          }
-        }
-      } catch (e) {
-        if (e.name !== "AbortError") addLog("Serial read: " + e.message, "sys");
-      } finally {
-        if (serialDecoder) lineBuffer += serialDecoder.decode();
-        serialReader = null;
-        dot.classList.remove("connected");
-        statusText.textContent = "Disconnected";
-        btnConnect.disabled = false;
-        btnDisconnect.disabled = true;
+async function readSerialLoop() {
+  try {
+    while (serialReader) {
+      const { value, done } = await serialReader.read();
+      if (done) break;
+      if (value && value.length && serialDecoder)
+        lineBuffer += serialDecoder.decode(value, { stream: true });
+      let nl;
+      while ((nl = lineBuffer.indexOf('\n')) >= 0) {
+        const raw = lineBuffer.slice(0, nl);
+        lineBuffer = lineBuffer.slice(nl + 1);
+        processLine(raw.replace(/\r/g, '').trim());
       }
     }
+  } catch (e) {
+    if (e.name !== 'AbortError') console.error('Serial read:', e.message);
+  } finally {
+    if (serialDecoder) lineBuffer += serialDecoder.decode();
+    serialReader = null;
+    setConnected(false);
+  }
+}
 
-    async function connectSerial() {
-      if (!navigator.serial) {
-        addLog("Web Serial API not available. Use Chrome/Edge and serve this page from http://localhost.", "sys");
-        return;
-      }
-      try {
-        serialPort = await navigator.serial.requestPort();
-        await serialPort.open({ baudRate: 115200 });
-        lineBuffer = "";
-        serialDecoder = new TextDecoder();
-        serialReader = serialPort.readable.getReader();
-        dot.classList.add("connected");
-        statusText.textContent = "Connected — reading USB serial";
-        btnConnect.disabled = true;
-        btnDisconnect.disabled = false;
-        addLog("Serial port open (115200 baud).", "sys");
-        readSerialLoop();
-      } catch (e) {
-        if (e.name === "NotFoundError") {
-          addLog("No port selected.", "sys");
-        } else {
-          addLog("Connect failed: " + e.message, "sys");
-        }
-        serialPort = null;
-        serialReader = null;
-      }
-    }
+function setConnected(on) {
+  logoDot.className = 'logo-dot' + (on ? ' connected' : '');
+  statusText.textContent = on ? 'Connected — USB serial' : 'Disconnected';
+  btnConnect.disabled = on;
+  btnDisconnect.disabled = !on;
+  if (!on) {
+    idleOverlay.classList.remove('hidden');
+    snrNumber.textContent = '—';
+    updateSpectrum(null, false);
+  }
+}
 
-    async function disconnectSerial() {
-      try {
-        if (serialReader) {
-          await serialReader.cancel();
-          serialReader = null;
-        }
-        if (serialPort) {
-          await serialPort.close();
-          serialPort = null;
-        }
-      } catch (e) {
-        addLog("Disconnect: " + e.message, "sys");
-      }
-      dot.classList.remove("connected");
-      statusText.textContent = "Disconnected";
-      btnConnect.disabled = false;
-      btnDisconnect.disabled = true;
-      addLog("Serial closed.", "sys");
-    }
+async function connectSerial() {
+  if (!navigator.serial) {
+    alert('Web Serial not available. Use Chrome/Edge and serve this page from http://localhost.');
+    return;
+  }
+  try {
+    serialPort = await navigator.serial.requestPort();
+    await serialPort.open({ baudRate: 115200 });
+    lineBuffer = '';
+    serialDecoder = new TextDecoder();
+    serialReader = serialPort.readable.getReader();
+    setConnected(true);
+    readSerialLoop();
+  } catch (e) {
+    if (e.name !== 'NotFoundError') console.error('Connect failed:', e.message);
+    serialPort = null; serialReader = null;
+  }
+}
 
-    btnConnect.addEventListener("click", connectSerial);
-    btnDisconnect.addEventListener("click", disconnectSerial);
+async function disconnectSerial() {
+  try {
+    if (serialReader) { await serialReader.cancel(); serialReader = null; }
+    if (serialPort)   { await serialPort.close();    serialPort = null; }
+  } catch (e) { console.error('Disconnect:', e.message); }
+  setConnected(false);
+}
 
-    drawColorbar(15, 35);
-  </script>
+btnConnect.addEventListener('click', connectSerial);
+btnDisconnect.addEventListener('click', disconnectSerial);
+
+drawColorbar(15, 35);
+updateSpectrum(null, false);
+</script>
 </body>
 </html>

@@ -30,7 +30,7 @@
 #define SPECTRUM_BINS       24    // downsampled clean-spectrum bars (ultrasonic band)
 
 // ── Thermal Config ────────────────────────────────────────────
-#define DELTA_T_THRESHOLD_C  2.0f   // drop >= 2 C = thermal anomaly
+#define DELTA_T_THRESHOLD_C  2.0f   // drop >= 2 C = thermal anomaly (used for localization confidence)
 #define THERMAL_SAMPLE_MS    1000   // 1 Hz keeps data rate within HM-10 BLE bandwidth (~1.5 KB/s)
 #define BASELINE_SAMPLES     10     // 10 seconds of baseline at 1 Hz
 
@@ -59,21 +59,23 @@ static int16_t   sample_buf[FFT_SIZE];
 static int       sample_count = 0;
 static arm_rfft_fast_instance_f32 fft_inst;
 static bool      noise_floor_ready = false;
-static uint8_t  spectrum_u8[SPECTRUM_BINS];
+static uint8_t   spectrum_u8[SPECTRUM_BINS];
 
 // ── DSP state ─────────────────────────────────────────────────
 static float snr_db          = 0.0f;
 static float peak_freq       = 0.0f;
 static int   confirm_count   = 0;
-static bool  acoustic_leak   = false;
+static bool  acoustic_leak   = false;   // PRIMARY leak indicator
 
 // ── Thermal state ─────────────────────────────────────────────
 Adafruit_MLX90640 mlx;
 static float thermal_frame[32 * 24];   // 768 pixels from MLX90640
-static float baseline_temp  = 0.0f;
-static float object_temp    = 0.0f;    // coldest pixel in frame
-static float delta_t        = 0.0f;
-static bool  thermal_anomaly = false;
+static float baseline_temp   = 0.0f;
+static float object_temp     = 0.0f;   // coldest pixel in frame
+static float delta_t         = 0.0f;
+static bool  thermal_anomaly = false;  // cold spot present — used for localization confidence
+static int   cold_pixel_col  = -1;     // 0-31, x position of coldest pixel
+static int   cold_pixel_row  = -1;     // 0-23, y position of coldest pixel
 static unsigned long last_thermal_ms = 0;
 
 static unsigned long last_print_ms = 0;
@@ -144,9 +146,10 @@ void setup() {
     }
     baseline_temp = sum / BASELINE_SAMPLES;
     Serial.printf("\nBaseline cold-pixel: %.2f C\n", baseline_temp);
-    Serial.println("\nMonitoring. Expose to ultrasonic noise + spray IPA to confirm leak.");
-    Serial.println("SNR(dB) | Peak(Hz) | Acoustic | ObjTemp | DeltaT | Thermal | FUSED");
-    Serial.println("---------------------------------------------------------------------");
+    Serial.println("\nMonitoring. Acoustic SNR >= 6 dB triggers leak detection.");
+    Serial.println("Thermal heatmap provides localization when a cold spot is present.");
+    Serial.println("SNR(dB) | Peak(Hz) | Acoustic | ObjTemp | DeltaT | ColdSpot(col,row) | STATUS");
+    Serial.println("-------------------------------------------------------------------------------");
 }
 
 // ── Acoustic pipeline ─────────────────────────────────────────
@@ -192,6 +195,7 @@ bool runAcoustic() {
     arm_max_f32(&clean[SIG_BIN_LOW], SIG_BIN_HIGH - SIG_BIN_LOW + 1, &peak_val, &peak_bin);
     peak_freq = (peak_bin + SIG_BIN_LOW) * BIN_RES;
 
+    // ── Acoustic is the sole leak gate ───────────────────────
     if (snr_db >= SNR_THRESHOLD_DB) {
         if (++confirm_count >= LEAK_CONFIRM_COUNT) acoustic_leak = true;
     } else {
@@ -235,20 +239,32 @@ void runThermal() {
         return;
     }
 
-    // Use the coldest pixel — evaporative cooling from a leak shows as cold spot
+    // Find coldest pixel and its 2D position in the 32×24 frame
     float min_t = thermal_frame[0];
-    for (int p = 1; p < 768; p++) if (thermal_frame[p] < min_t) min_t = thermal_frame[p];
+    int   min_p = 0;
+    for (int p = 1; p < 768; p++) {
+        if (thermal_frame[p] < min_t) {
+            min_t = thermal_frame[p];
+            min_p = p;
+        }
+    }
 
     object_temp     = min_t;
     delta_t         = object_temp - baseline_temp;
+    cold_pixel_col  = min_p % 32;   // x: 0–31
+    cold_pixel_row  = min_p / 32;   // y: 0–23
+
+    // Thermal anomaly = cold spot is present; used as localization confidence flag,
+    // NOT as a gate for leak detection.
     thermal_anomaly = (delta_t <= -DELTA_T_THRESHOLD_C);
 
 #if ENABLE_HM10_BLE
-    // Binary on UART1 for HM-10 (optional)
+    // Binary on UART1 for HM-10
     uint8_t header[2] = {0xFF, 0xFE};
     Serial1.write(header, 2);
     Serial1.write((uint8_t*)&snr_db, sizeof(snr_db));
     Serial1.write((uint8_t*)&peak_freq, sizeof(peak_freq));
+    // Bit 0 = acoustic_leak (primary), Bit 1 = thermal_anomaly (localization confidence)
     uint8_t flags = (acoustic_leak ? 1u : 0u) | (thermal_anomaly ? 2u : 0u);
     Serial1.write(&flags, 1);
     Serial1.write(spectrum_u8, sizeof(spectrum_u8));
@@ -258,7 +274,7 @@ void runThermal() {
     }
 #endif
 
-    // USB: full 32×24 grid for web/index.html heatmap (Web Serial); then $PSSS + spectrum
+    // USB: full 32×24 grid for web/index.html heatmap (Web Serial)
     Serial.print("FRAME:");
     for (int i = 0; i < 768; i++) {
         if (i) Serial.print(",");
@@ -266,8 +282,12 @@ void runThermal() {
     }
     Serial.print("\r\n");
 
-    bool fused = acoustic_leak && thermal_anomaly;
-    Serial.printf("$PSSS,%u,%.2f,%.0f,%.2f", fused ? 0u : 1u, snr_db, peak_freq, object_temp);
+    // $PSSS sentence: status=0 means leak, col/row appended for localization
+    // Format: $PSSS,<status>,<snr>,<peak_hz>,<obj_temp>,<cold_col>,<cold_row>,<spectrum...>*
+    Serial.printf("$PSSS,%u,%.2f,%.0f,%.2f,%d,%d",
+                  acoustic_leak ? 0u : 1u,
+                  snr_db, peak_freq, object_temp,
+                  cold_pixel_col, cold_pixel_row);
     for (int i = 0; i < SPECTRUM_BINS; i++) Serial.printf(",%u", (unsigned)spectrum_u8[i]);
     Serial.printf("*\r\n");
 }
@@ -277,16 +297,29 @@ void loop() {
     bool new_fft = runAcoustic();
     runThermal();
 
-    bool leak = acoustic_leak && thermal_anomaly;
-
     unsigned long now = millis();
     if (new_fft && now - last_print_ms >= PRINT_INTERVAL_MS) {
         last_print_ms = now;
-        Serial.printf("%7.1f | %8.0f | %8s | %7.2f | %6.2f | %7s | %s\n",
+
+        // Build a status string that reflects the new logic:
+        //   acoustic alone  → LEAK DETECTED
+        //   acoustic + cold → LEAK DETECTED + LOCALIZED
+        //   no acoustic     → monitoring
+        char status[48];
+        if (acoustic_leak && thermal_anomaly) {
+            snprintf(status, sizeof(status), "*** LEAK — localized @ col%d,row%d ***",
+                     cold_pixel_col, cold_pixel_row);
+        } else if (acoustic_leak) {
+            snprintf(status, sizeof(status), "*** LEAK DETECTED (thermal: no cold spot) ***");
+        } else {
+            snprintf(status, sizeof(status), "monitoring...");
+        }
+
+        Serial.printf("%7.1f | %8.0f | %8s | %7.2f | %6.2f | (%2d, %2d)          | %s\n",
                       snr_db, peak_freq,
                       acoustic_leak   ? "LEAK" : "----",
                       object_temp, delta_t,
-                      thermal_anomaly ? "ANOMALY" : "-------",
-                      leak            ? "*** LEAK CONFIRMED ***" : "monitoring...");
+                      cold_pixel_col, cold_pixel_row,
+                      status);
     }
 }
