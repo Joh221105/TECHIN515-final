@@ -8,14 +8,11 @@
 // ── Wiring ────────────────────────────────────────────────────
 // SPH0645: BCLK→Pin21  LRCL→Pin20  DOUT→Pin8  SEL→GND  3V→3.3V
 // MLX90640: SCL→Pin19  SDA→Pin18  VDD→3.3V  VSS→GND
-// HM-10 BLE: TX1(pin0)→HM-10 RX, RX1(pin1)→HM-10 TX, VCC→3.3V, GND→GND
-//            Configure HM-10 to 115200 baud: AT+BAUD4
+// ESP32-S3 BLE: ESP32-S3 D6 (TX) → Teensy pin 1 (TX1/Serial1)
+//               ESP32-S3 RX      → Teensy pin 0 (RX1/Serial1)
+//               VCC→3.3V  GND→GND
 //
-// ENABLE_HM10_BLE=1: binary frames on Serial1 (Web Bluetooth / thermal_viewer).
-// Default 0: USB-only — tools/ble_connect.py + web/index.html (no HM-10 required).
-#ifndef ENABLE_HM10_BLE
-#define ENABLE_HM10_BLE 0
-#endif
+// BLE-only build: binary frames on Serial1 forwarded to ESP32-S3 for BLE.
 
 // ── DSP Config ───────────────────────────────────────────────
 #define SAMPLE_RATE         100000
@@ -30,9 +27,13 @@
 #define SPECTRUM_BINS       24    // downsampled clean-spectrum bars (ultrasonic band)
 
 // ── Thermal Config ────────────────────────────────────────────
-#define DELTA_T_THRESHOLD_C  2.0f   // drop >= 2 C = thermal anomaly (used for localization confidence)
-#define THERMAL_SAMPLE_MS    1000   // 1 Hz keeps data rate within HM-10 BLE bandwidth (~1.5 KB/s)
-#define BASELINE_SAMPLES     10     // 10 seconds of baseline at 1 Hz
+#define DELTA_T_THRESHOLD_C  2.0f
+#define THERMAL_SAMPLE_MS  250    // 4 Hz target for lower perceived latency
+#define CONTROL_SAMPLE_MS  100    // 10 Hz control/status stream
+#define BASELINE_SAMPLES     (10000 / THERMAL_SAMPLE_MS)  // always ~10 s of baseline
+#define THERMAL_TX_W         16
+#define THERMAL_TX_H         12
+#define THERMAL_TX_PIXELS    (THERMAL_TX_W * THERMAL_TX_H)
 
 // ── Output ────────────────────────────────────────────────────
 #define PRINT_INTERVAL_MS    500
@@ -79,6 +80,7 @@ static int   cold_pixel_row  = -1;     // 0-23, y position of coldest pixel
 static unsigned long last_thermal_ms = 0;
 
 static unsigned long last_print_ms = 0;
+static unsigned long last_control_ms = 0;
 
 // ── Helpers ───────────────────────────────────────────────────
 float bandPower(float32_t* mag, int lo, int hi) {
@@ -104,9 +106,7 @@ static void rfftMagnitudes(const float32_t* y, float32_t* mag, int nReal) {
 // ── Setup ─────────────────────────────────────────────────────
 void setup() {
     Serial.begin(115200);
-#if ENABLE_HM10_BLE
-    Serial1.begin(115200);
-#endif
+    Serial1.begin(115200);  // ESP32-S3: pin0=RX1, pin1=TX1
     while (!Serial && millis() < 3000);
 
     Serial.println("=== PSSS Leak Detector ===");
@@ -132,7 +132,7 @@ void setup() {
     }
     mlx.setMode(MLX90640_CHESS);
     mlx.setResolution(MLX90640_ADC_18BIT);
-    mlx.setRefreshRate(MLX90640_1_HZ);
+    mlx.setRefreshRate(MLX90640_4_HZ);
     Serial.println("MLX90640 ready. Collecting 10s baseline — keep sensor still...");
 
     float sum = 0;
@@ -227,6 +227,24 @@ bool runAcoustic() {
     return true;
 }
 
+static void emitControlPacket() {
+    // Control packet: 0xFF 0xFC + snr f32 + peak f32 + flags u8 + spectrum[24].
+    const uint8_t header[2] = {0xFF, 0xFC};
+    const uint8_t flags = (acoustic_leak ? 1u : 0u) | (thermal_anomaly ? 2u : 0u);
+    Serial1.write(header, 2);
+    Serial1.write((uint8_t*)&snr_db, sizeof(snr_db));
+    Serial1.write((uint8_t*)&peak_freq, sizeof(peak_freq));
+    Serial1.write(&flags, 1);
+    Serial1.write(spectrum_u8, sizeof(spectrum_u8));
+}
+
+static void runControl() {
+    unsigned long now = millis();
+    if (now - last_control_ms < CONTROL_SAMPLE_MS) return;
+    last_control_ms = now;
+    emitControlPacket();
+}
+
 // ── Thermal pipeline ──────────────────────────────────────────
 void runThermal() {
     unsigned long now = millis();
@@ -258,43 +276,37 @@ void runThermal() {
     // NOT as a gate for leak detection.
     thermal_anomaly = (delta_t <= -DELTA_T_THRESHOLD_C);
 
-#if ENABLE_HM10_BLE
     // Binary on UART1 for HM-10
     uint8_t header[2] = {0xFF, 0xFE};
+    uint32_t thermal_ts_ms = millis();
     Serial1.write(header, 2);
     Serial1.write((uint8_t*)&snr_db, sizeof(snr_db));
     Serial1.write((uint8_t*)&peak_freq, sizeof(peak_freq));
+    Serial1.write((uint8_t*)&thermal_ts_ms, sizeof(thermal_ts_ms));
     // Bit 0 = acoustic_leak (primary), Bit 1 = thermal_anomaly (localization confidence)
     uint8_t flags = (acoustic_leak ? 1u : 0u) | (thermal_anomaly ? 2u : 0u);
     Serial1.write(&flags, 1);
     Serial1.write(spectrum_u8, sizeof(spectrum_u8));
-    for (int i = 0; i < 768; i++) {
-        int16_t px = (int16_t)lroundf(thermal_frame[i] * 10.0f);
-        Serial1.write((uint8_t*)&px, 2);
+    // Downsample 32x24 -> 16x12 (2x2 average).
+    for (int y = 0; y < THERMAL_TX_H; y++) {
+        for (int x = 0; x < THERMAL_TX_W; x++) {
+            int src_x = x * 2;
+            int src_y = y * 2;
+            float t0 = thermal_frame[src_y * 32 + src_x];
+            float t1 = thermal_frame[src_y * 32 + (src_x + 1)];
+            float t2 = thermal_frame[(src_y + 1) * 32 + src_x];
+            float t3 = thermal_frame[(src_y + 1) * 32 + (src_x + 1)];
+            float t_avg = 0.25f * (t0 + t1 + t2 + t3);
+            int16_t px = (int16_t)lroundf(t_avg * 10.0f);
+            Serial1.write((uint8_t*)&px, 2);
+        }
     }
-#endif
-
-    // USB: full 32×24 grid for web/index.html heatmap (Web Serial)
-    Serial.print("FRAME:");
-    for (int i = 0; i < 768; i++) {
-        if (i) Serial.print(",");
-        Serial.printf("%.2f", thermal_frame[i]);
-    }
-    Serial.print("\r\n");
-
-    // $PSSS sentence: status=0 means leak, col/row appended for localization
-    // Format: $PSSS,<status>,<snr>,<peak_hz>,<obj_temp>,<cold_col>,<cold_row>,<spectrum...>*
-    Serial.printf("$PSSS,%u,%.2f,%.0f,%.2f,%d,%d",
-                  acoustic_leak ? 0u : 1u,
-                  snr_db, peak_freq, object_temp,
-                  cold_pixel_col, cold_pixel_row);
-    for (int i = 0; i < SPECTRUM_BINS; i++) Serial.printf(",%u", (unsigned)spectrum_u8[i]);
-    Serial.printf("*\r\n");
 }
 
 // ── Main loop ─────────────────────────────────────────────────
 void loop() {
     bool new_fft = runAcoustic();
+    runControl();
     runThermal();
 
     unsigned long now = millis();

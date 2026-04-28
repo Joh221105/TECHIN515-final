@@ -129,9 +129,11 @@ main {
 
 #thermal-canvas {
   display: block;
-  max-width: 100%;
-  max-height: 100%;
+  width: min(78vw, 980px);
+  height: auto;
+  aspect-ratio: 4 / 3;
   image-rendering: pixelated;
+  image-rendering: crisp-edges;
   border-radius: 4px;
   position: relative; z-index: 1;
 }
@@ -293,7 +295,7 @@ main {
     </div>
     <div class="header-right">
       <span class="status-text" id="status-text">Disconnected</span>
-      <button type="button" class="btn btn-connect" id="btn-connect">Connect USB</button>
+      <button type="button" class="btn btn-connect" id="btn-connect-ble" style="background:var(--ok);color:var(--bg);">Connect BLE</button>
       <button type="button" class="btn btn-disconnect" id="btn-disconnect" disabled>Disconnect</button>
     </div>
   </header>
@@ -303,9 +305,9 @@ main {
     <!-- Heatmap -->
     <div class="canvas-wrap">
       <div id="idle-overlay">
-        <div class="idle-text">Connect Teensy over USB to begin streaming</div>
+        <div class="idle-text">Connect via BLE to begin streaming</div>
       </div>
-      <canvas id="thermal-canvas" width="640" height="480"></canvas>
+      <canvas id="thermal-canvas" width="32" height="24"></canvas>
       <div id="colorbar-wrap">
         <span class="cb-label" id="cb-max">—</span>
         <canvas id="colorbar-canvas" width="10" height="160"></canvas>
@@ -352,29 +354,34 @@ main {
 'use strict';
 
 const SPEC_BINS      = 24;
-const THERMAL_PIXELS = 768;
+const DEFAULT_THERMAL_W = 16;
+const DEFAULT_THERMAL_H = 12;
+const WS_URL = 'ws://localhost:8765';
 
 const CMAP_STOPS = [0, 0.25, 0.5, 0.75, 1];
 const CMAP_R     = [0,   0,   0, 255, 255];
 const CMAP_G     = [0, 255, 255, 255,   0];
 const CMAP_B     = [255,255,   0,   0,   0];
 
-let lastTemps768 = null;
-let serialPort   = null;
-let serialReader = null;
-let lineBuffer   = '';
-let serialDecoder = null;
+let lastTemps = null;
+let thermalW = DEFAULT_THERMAL_W;
+let thermalH = DEFAULT_THERMAL_H;
+let thermalDirty  = false;
+let wsConn        = null;
+let thermalTsMs   = null;
+let lastRenderAt  = 0;
+let thermalFps    = 0;
 
 // DOM
-const logoDot      = document.getElementById('logo-dot');
-const statusText   = document.getElementById('status-text');
-const btnConnect   = document.getElementById('btn-connect');
+const logoDot       = document.getElementById('logo-dot');
+const statusText    = document.getElementById('status-text');
+const btnConnectBle = document.getElementById('btn-connect-ble');
 const btnDisconnect = document.getElementById('btn-disconnect');
-const idleOverlay  = document.getElementById('idle-overlay');
-const leakBadge    = document.getElementById('leak-badge');
-const leakIcon     = document.getElementById('leak-icon');
-const leakText     = document.getElementById('leak-text');
-const snrNumber    = document.getElementById('snr-number');
+const idleOverlay   = document.getElementById('idle-overlay');
+const leakBadge     = document.getElementById('leak-badge');
+const leakIcon      = document.getElementById('leak-icon');
+const leakText      = document.getElementById('leak-text');
+const snrNumber     = document.getElementById('snr-number');
 
 // Build 24 spectrum bars
 const specBarsEl = document.getElementById('spectrum-bars');
@@ -418,13 +425,28 @@ function cmap(norm) {
   ];
 }
 
+const CMAP_LUT = new Uint8ClampedArray(256 * 3);
+for (let i = 0; i < 256; i++) {
+  const [r, g, b] = cmap(i / 255);
+  const j = i * 3;
+  CMAP_LUT[j] = r;
+  CMAP_LUT[j + 1] = g;
+  CMAP_LUT[j + 2] = b;
+}
+
+function cmapLut(norm) {
+  const idx = Math.max(0, Math.min(255, Math.round(norm * 255)));
+  const p = idx * 3;
+  return [CMAP_LUT[p], CMAP_LUT[p + 1], CMAP_LUT[p + 2]];
+}
+
 function drawColorbar(tMin, tMax) {
   const el = document.getElementById('colorbar-canvas');
   const ctx = el.getContext('2d');
   const h = el.height;
   const img = ctx.createImageData(1, h);
   for (let i = 0; i < h; i++) {
-    const rgb = cmap(1 - i / h);
+    const rgb = cmapLut(1 - i / h);
     const p = i * 4;
     img.data[p] = rgb[0]; img.data[p+1] = rgb[1]; img.data[p+2] = rgb[2]; img.data[p+3] = 255;
   }
@@ -436,17 +458,17 @@ function drawColorbar(tMin, tMax) {
   document.getElementById('cb-min').textContent = tMin.toFixed(1) + '°C';
 }
 
-function drawThermalCanvas(temps) {
+function drawThermalCanvas(temps, gw, gh) {
   const canvas = document.getElementById('thermal-canvas');
-  if (!canvas || !temps || temps.length !== THERMAL_PIXELS) return;
+  if (!canvas || !temps || !gw || !gh || temps.length !== gw * gh) return;
   const ctx = canvas.getContext('2d');
-  const GW = 32, GH = 24;
-  const CW = canvas.width, CH = canvas.height;
-  const img = ctx.createImageData(CW, CH);
+  canvas.width = gw;
+  canvas.height = gh;
+  const img = ctx.createImageData(gw, gh);
   const d = img.data;
 
   let minT = Infinity, maxT = -Infinity;
-  for (let i = 0; i < THERMAL_PIXELS; i++) {
+  for (let i = 0; i < temps.length; i++) {
     if (temps[i] < minT) minT = temps[i];
     if (temps[i] > maxT) maxT = temps[i];
   }
@@ -454,18 +476,11 @@ function drawThermalCanvas(temps) {
   const tMin = minT - pad, tMax = maxT + pad;
   const range = Math.max(tMax - tMin, 0.01);
 
-  for (let oy = 0; oy < CH; oy++) {
-    const sy = ((oy + 0.5) / CH) * GH - 0.5;
-    const y0 = Math.max(0, Math.floor(sy)), y1 = Math.min(GH-1, y0+1);
-    const ty = sy - y0;
-    for (let ox = 0; ox < CW; ox++) {
-      const sx = ((ox + 0.5) / CW) * GW - 0.5;
-      const x0 = Math.max(0, Math.floor(sx)), x1 = Math.min(GW-1, x0+1);
-      const tx = sx - x0;
-      const t = (1-tx)*(1-ty)*temps[y0*GW+x0] + tx*(1-ty)*temps[y0*GW+x1]
-              + (1-tx)*ty*temps[y1*GW+x0]     + tx*ty*temps[y1*GW+x1];
-      const rgb = cmap((t - tMin) / range);
-      const p = (oy * CW + ox) * 4;
+  for (let y = 0; y < gh; y++) {
+    for (let x = 0; x < gw; x++) {
+      const t = temps[y * gw + x];
+      const rgb = cmapLut((t - tMin) / range);
+      const p = (y * gw + x) * 4;
       d[p] = rgb[0]; d[p+1] = rgb[1]; d[p+2] = rgb[2]; d[p+3] = 255;
     }
   }
@@ -474,34 +489,22 @@ function drawThermalCanvas(temps) {
   idleOverlay.classList.add('hidden');
 }
 
-function parseFrameLine(line) {
-  if (!line.startsWith('FRAME:')) return false;
-  const parts = line.slice(6).split(',');
-  if (parts.length !== THERMAL_PIXELS) return false;
-  const out = new Array(THERMAL_PIXELS);
-  for (let i = 0; i < THERMAL_PIXELS; i++) {
-    const v = parseFloat(parts[i]);
-    if (!Number.isFinite(v)) return false;
-    out[i] = v;
-  }
-  lastTemps768 = out;
-  return true;
-}
-
 // $PSSS,status,snr_db,peak_freq,obj_temp,spec[0],...,spec[23]*
 function parsePsssLine(line) {
   const s = line.trim().replace(/\*$/, '');
   if (!s.startsWith('$PSSS,')) return null;
   const parts = s.split(',');
-  if (parts.length < 5 + SPEC_BINS) return null;
-  const status = parseInt(parts[1], 10);   // 0 = leak alert, 1 = ok
-  const snr    = parseFloat(parts[2]);
+  if (parts.length < 7 + SPEC_BINS) return null;
+  const status   = parseInt(parts[1], 10);   // 0 = leak alert, 1 = ok
+  const snr      = parseFloat(parts[2]);
+  const cold_col = parseInt(parts[5], 10);
+  const cold_row = parseInt(parts[6], 10);
   const spectrum = new Array(SPEC_BINS);
   for (let i = 0; i < SPEC_BINS; i++) {
-    spectrum[i] = parseInt(parts[5 + i], 10);
+    spectrum[i] = parseInt(parts[7 + i], 10);
     if (Number.isNaN(spectrum[i])) return null;
   }
-  return { status, snr, spectrum };
+  return { status, snr, cold_col, cold_row, spectrum };
 }
 
 function updateUI(packet) {
@@ -523,43 +526,36 @@ function updateUI(packet) {
 
   updateSpectrum(packet.spectrum, acousticAlert);
 
-  if (lastTemps768) drawThermalCanvas(lastTemps768);
 }
 
-function processLine(line) {
-  if (!line) return;
-  if (line.startsWith('FRAME:')) { parseFrameLine(line); return; }
-  const packet = parsePsssLine(line);
-  if (packet) updateUI(packet);
-}
-
-async function readSerialLoop() {
-  try {
-    while (serialReader) {
-      const { value, done } = await serialReader.read();
-      if (done) break;
-      if (value && value.length && serialDecoder)
-        lineBuffer += serialDecoder.decode(value, { stream: true });
-      let nl;
-      while ((nl = lineBuffer.indexOf('\n')) >= 0) {
-        const raw = lineBuffer.slice(0, nl);
-        lineBuffer = lineBuffer.slice(nl + 1);
-        processLine(raw.replace(/\r/g, '').trim());
-      }
+function renderLoop() {
+  if (thermalDirty && lastTemps) {
+    const now = performance.now();
+    if (lastRenderAt > 0) {
+      const dt = now - lastRenderAt;
+      if (dt > 0) thermalFps = 1000 / dt;
     }
-  } catch (e) {
-    if (e.name !== 'AbortError') console.error('Serial read:', e.message);
-  } finally {
-    if (serialDecoder) lineBuffer += serialDecoder.decode();
-    serialReader = null;
-    setConnected(false);
+    lastRenderAt = now;
+    drawThermalCanvas(lastTemps, thermalW, thermalH);
+    thermalDirty = false;
+    if (typeof thermalTsMs === 'number' && Number.isFinite(thermalTsMs)) {
+      const frameAgeMs = Math.max(0, Math.round(Date.now() - thermalTsMs));
+      statusText.textContent = `Connected — BLE | ${frameAgeMs} ms | ${thermalFps.toFixed(1)} fps`;
+    } else {
+      statusText.textContent = `Connected — BLE | ${thermalFps.toFixed(1)} fps`;
+    }
   }
+  requestAnimationFrame(renderLoop);
 }
 
 function setConnected(on) {
   logoDot.className = 'logo-dot' + (on ? ' connected' : '');
-  statusText.textContent = on ? 'Connected — USB serial' : 'Disconnected';
-  btnConnect.disabled = on;
+  if (on) {
+    statusText.textContent = 'Connected — BLE';
+  } else {
+    statusText.textContent = 'Disconnected';
+  }
+  btnConnectBle.disabled = on;
   btnDisconnect.disabled = !on;
   if (!on) {
     idleOverlay.classList.remove('hidden');
@@ -568,38 +564,54 @@ function setConnected(on) {
   }
 }
 
-async function connectSerial() {
-  if (!navigator.serial) {
-    alert('Web Serial not available. Use Chrome/Edge and serve this page from http://localhost.');
-    return;
-  }
-  try {
-    serialPort = await navigator.serial.requestPort();
-    await serialPort.open({ baudRate: 115200 });
-    lineBuffer = '';
-    serialDecoder = new TextDecoder();
-    serialReader = serialPort.readable.getReader();
-    setConnected(true);
-    readSerialLoop();
-  } catch (e) {
-    if (e.name !== 'NotFoundError') console.error('Connect failed:', e.message);
-    serialPort = null; serialReader = null;
-  }
+function connectBLE() {
+  if (wsConn) return;
+  statusText.textContent = 'Connecting…';
+  wsConn = new WebSocket(WS_URL);
+  wsConn.onopen  = () => { console.log('[BLE] WebSocket open'); setConnected(true); };
+  wsConn.onclose = (ev) => { console.warn('[BLE] WebSocket closed', ev.code, ev.reason); wsConn = null; setConnected(false); };
+  wsConn.onerror = (ev) => { console.error('[BLE] WebSocket error', ev); wsConn = null; setConnected(false); };
+  wsConn.onmessage = (ev) => {
+    try {
+      const d = JSON.parse(ev.data);
+      if (!('status' in d)) { console.warn('[BLE] no status field', Object.keys(d)); return; }
+      const kind = d.kind || '';
+      if ((kind === 'thermal' || !kind) && Number.isFinite(d.thermal_ts_ms)) thermalTsMs = d.thermal_ts_ms;
+      if ((kind === 'thermal' || !kind) && d.thermal && Array.isArray(d.thermal)) {
+        let w = Number.isInteger(d.thermal_w) ? d.thermal_w : 0;
+        let h = Number.isInteger(d.thermal_h) ? d.thermal_h : 0;
+        if (w <= 0 || h <= 0 || d.thermal.length !== w * h) {
+          if (d.thermal.length === 768) { w = 32; h = 24; }
+          else if (d.thermal.length === 192) { w = 16; h = 12; }
+        }
+        if (w > 0 && h > 0 && d.thermal.length === w * h) {
+          lastTemps = d.thermal;
+          thermalW = w;
+          thermalH = h;
+          thermalDirty = true;
+        }
+      }
+      if (kind === 'control' || !kind) {
+        updateUI({ status: d.status, snr: d.snr ?? d.value1 ?? 0, spectrum: d.spectrum || [] });
+      }
+    } catch (err) { console.error('[BLE] parse/render error:', err, ev.data.slice(0, 200)); }
+  };
 }
 
-async function disconnectSerial() {
-  try {
-    if (serialReader) { await serialReader.cancel(); serialReader = null; }
-    if (serialPort)   { await serialPort.close();    serialPort = null; }
-  } catch (e) { console.error('Disconnect:', e.message); }
+function disconnectBLE() {
+  if (wsConn) { wsConn.close(); wsConn = null; }
+  thermalTsMs = null;
+  lastRenderAt = 0;
+  thermalFps = 0;
   setConnected(false);
 }
 
-btnConnect.addEventListener('click', connectSerial);
-btnDisconnect.addEventListener('click', disconnectSerial);
+btnConnectBle.addEventListener('click', connectBLE);
+btnDisconnect.addEventListener('click', disconnectBLE);
 
 drawColorbar(15, 35);
 updateSpectrum(null, false);
+requestAnimationFrame(renderLoop);
 </script>
 </body>
 </html>

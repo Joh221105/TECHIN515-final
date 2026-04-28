@@ -1,16 +1,14 @@
 """
-ble_connect.py — Serial bridge for PSSS sensor data
-Reads $PSSS sentences (USB serial from Teensy) and/or binary HM-10 frames from the
-same wire, and broadcasts parsed packets over a local WebSocket so web/index.html
-can display them.
+ble_connect.py — BLE-to-WebSocket bridge for PSSS sensor data.
 
 Usage:
-    pip install pyserial websockets
-    python ble_connect.py --port /dev/tty.usbmodem* --baud 115200
+    pip install bleak websockets
+    python ble_connect.py
+    python ble_connect.py --ble-address AA:BB:CC:DD:EE:FF   # skip scan
 
 Dependencies:
-    pyserial >= 3.5
     websockets >= 11.0
+    bleak >= 0.21
 """
 
 import argparse
@@ -19,200 +17,201 @@ import json
 import struct
 from datetime import datetime
 
-import serial
-import serial.tools.list_ports
 import websockets
 
 WEBSOCKET_HOST = "localhost"
 WEBSOCKET_PORT = 8765
 
-# Binary frame (must match firmware + streamlit/app.html)
-HEADER = b"\xff\xfe"
-FRAME_META = 9  # snr f32 + peak f32 + flags u8
+# ESP32-S3 GATT identifiers (ffe0/ffe1 — same as legacy HM-10, no client changes needed)
+BLE_SERVICE = "0000ffe0-0000-1000-8000-00805f9b34fb"
+BLE_CHAR    = "0000ffe1-0000-1000-8000-00805f9b34fb"
+
+# Binary frame layout (must match firmware)
+HEADER_THERMAL = b"\xff\xfe"
+HEADER_CONTROL = b"\xff\xfc"
+FRAME_META_THERMAL = 13   # snr f32 + peak f32 + thermal_ts u32 + flags u8
+FRAME_META_CONTROL = 9    # snr f32 + peak f32 + flags u8
 SPECTRUM_BYTES = 24
-FRAME_BODY = 768 * 2
-FRAME_TOTAL = 2 + FRAME_META + SPECTRUM_BYTES + FRAME_BODY  # 1571
+THERMAL_W      = 16
+THERMAL_H      = 12
+THERMAL_PIXELS = THERMAL_W * THERMAL_H
+FRAME_BODY_THERMAL = THERMAL_PIXELS * 2  # int16 thermal payload
+FRAME_TOTAL_THERMAL = 2 + FRAME_META_THERMAL + SPECTRUM_BYTES + FRAME_BODY_THERMAL  # 423
+FRAME_TOTAL_CONTROL = 2 + FRAME_META_CONTROL + SPECTRUM_BYTES  # 35
 
 # All connected WebSocket clients
 clients: set = set()
 
 
-def parse_psss(line: str) -> dict | None:
-    """Parse a $PSSS sentence into a dict.
+# ── Parsers ────────────────────────────────────────────────────────────────────
 
-    Short form: $PSSS,<status>,<snr>,<peak_hz>,<temp_c>*
-    Full form:  same + 24 comma-separated spectrum bytes (0–255) after temp.
-    """
-    line = line.strip()
-    if not line.startswith("$PSSS"):
+def parse_thermal_frame(chunk: bytes) -> dict | None:
+    """Decode one thermal frame (0xFF 0xFE) into a JSON-ready dict."""
+    if len(chunk) != FRAME_TOTAL_THERMAL or chunk[0:2] != HEADER_THERMAL:
         return None
-    try:
-        body = line.lstrip("$").rstrip("*")
-        parts = body.split(",")
-        out: dict = {
-            "timestamp": datetime.now().isoformat(),
-            "status": int(parts[1]),
-            "value1": float(parts[2]),
-            "value2": float(parts[3]),
-            "value3": float(parts[4]),
-            "raw": line,
-        }
-        if len(parts) >= 5 + SPECTRUM_BYTES:
-            out["spectrum"] = [int(parts[i]) for i in range(5, 5 + SPECTRUM_BYTES)]
-        return out
-    except (IndexError, ValueError):
-        return None
+    snr, peak, thermal_ts_ms, flags = struct.unpack_from("<ffIB", chunk, 2)
+    spectrum = list(chunk[15: 15 + SPECTRUM_BYTES])
+    off = 15 + SPECTRUM_BYTES
+    temps: list[float] = []
+    for i in range(THERMAL_PIXELS):
+        (px,) = struct.unpack_from("<h", chunk, off + i * 2)
+        temps.append(px / 10.0)
+    min_t = min(temps)
+    acoustic = bool(flags & 1)
+    thermal  = bool(flags & 2)
+    status   = 0 if acoustic else 1
+    return {
+        "kind":            "thermal",
+        "timestamp":       datetime.now().isoformat(),
+        "status":          status,
+        "snr":             snr,
+        "peak_freq":       peak,
+        "thermal_ts_ms":   thermal_ts_ms,
+        "min_temp":        min_t,
+        # legacy aliases
+        "value1":          snr,
+        "value2":          peak,
+        "value3":          min_t,
+        "flags":           flags,
+        "acoustic_leak":   acoustic,
+        "thermal_anomaly": thermal,
+        "spectrum":        spectrum,
+        "thermal":         temps,
+        "thermal_w":       THERMAL_W,
+        "thermal_h":       THERMAL_H,
+        "raw":             f"$PSSS,{status},{snr:.2f},{peak:.0f},{min_t:.2f}*",
+    }
 
-
-def parse_binary_frame(chunk: bytes) -> dict | None:
-    """Parse one HM-10 frame into the same dict shape as parse_psss."""
-    if len(chunk) != FRAME_TOTAL or chunk[0:2] != HEADER:
+def parse_control_frame(chunk: bytes) -> dict | None:
+    """Decode one control frame (0xFF 0xFC) into a JSON-ready dict."""
+    if len(chunk) != FRAME_TOTAL_CONTROL or chunk[0:2] != HEADER_CONTROL:
         return None
     snr, peak, flags = struct.unpack_from("<ffB", chunk, 2)
-    spectrum = list(chunk[11 : 11 + SPECTRUM_BYTES])
-    min_t = float("inf")
-    off = 11 + SPECTRUM_BYTES
-    for i in range(768):
-        (px,) = struct.unpack_from("<h", chunk, off + i * 2)
-        t = px / 10.0
-        if t < min_t:
-            min_t = t
+    spectrum = list(chunk[11: 11 + SPECTRUM_BYTES])
     acoustic = bool(flags & 1)
     thermal = bool(flags & 2)
-    fused = acoustic and thermal
-    status = 0 if fused else 1
-    raw = f"$PSSS,{status},{snr:.2f},{peak:.0f},{min_t:.2f}*"
+    status = 0 if acoustic else 1
     return {
-        "timestamp": datetime.now().isoformat(),
-        "status": status,
-        "value1": snr,
-        "value2": peak,
-        "value3": min_t,
-        "flags": flags,
-        "acoustic_leak": acoustic,
+        "kind":            "control",
+        "timestamp":       datetime.now().isoformat(),
+        "status":          status,
+        "snr":             snr,
+        "peak_freq":       peak,
+        "value1":          snr,
+        "value2":          peak,
+        "flags":           flags,
+        "acoustic_leak":   acoustic,
         "thermal_anomaly": thermal,
-        "spectrum": spectrum,
-        "raw": raw,
+        "spectrum":        spectrum,
+        "raw":             f"$PSSS,{status},{snr:.2f},{peak:.0f},*",
     }
 
 
-def _trim_rx_buffer(buf: bytearray) -> None:
-    """Avoid unbounded growth when no sync byte is found."""
-    if len(buf) > 16000:
-        del buf[:-1]
+# ── Frame reassembly helper ────────────────────────────────────────────────────
+
+async def _dispatch_frames(buf: bytearray, verbose: bool) -> None:
+    """Extract complete binary frames from buf, broadcast each as JSON."""
+    while True:
+        hi = -1
+        for i in range(len(buf) - 1):
+            if buf[i] == 0xFF and (buf[i + 1] == 0xFE or buf[i + 1] == 0xFC):
+                hi = i
+                break
+        if hi < 0:
+            if len(buf) > 16000:
+                buf.clear()
+            break
+        if hi > 0:
+            del buf[:hi]
+        if len(buf) < 2:
+            break
+        frame_total = FRAME_TOTAL_THERMAL if buf[1] == 0xFE else FRAME_TOTAL_CONTROL
+        if len(buf) < frame_total:
+            break
+        frame = bytes(buf[:frame_total])
+        packet = parse_thermal_frame(frame) if buf[1] == 0xFE else parse_control_frame(frame)
+        del buf[:frame_total]
+        if packet and clients:
+            msg = json.dumps(packet)
+            if verbose:
+                print(f"  [{packet['kind']}] snr={packet['snr']:.1f} status={packet['status']}")
+            await asyncio.gather(*(c.send(msg) for c in clients))
 
 
-async def serial_reader(port: str, baud: int, verbose: bool) -> None:
-    """Read from serial (mixed text lines + optional binary) and broadcast JSON."""
-    print(f"Opening serial port {port} at {baud} baud...")
-    ser = serial.Serial(port, baud, timeout=0.05)
-    print("Serial port open. Waiting for data...")
-    loop = asyncio.get_event_loop()
+# ── BLE mode ──────────────────────────────────────────────────────────────────
+
+async def ble_reader(address: str | None, verbose: bool) -> None:
+    try:
+        from bleak import BleakClient, BleakScanner
+    except ImportError:
+        print("ERROR: bleak not installed. Run: pip install bleak")
+        return
+
     buf = bytearray()
 
-    while True:
-        chunk = await loop.run_in_executor(None, ser.read, 4096)
-        if chunk:
-            buf.extend(chunk)
-            if verbose:
-                print(f"  [rx] +{len(chunk)} bytes (buffer {len(buf)})")
+    async def on_notify(sender, data: bytearray) -> None:
+        buf.extend(data)
+        await _dispatch_frames(buf, verbose)
 
-        # --- Extract newline-terminated text lines ---
-        while True:
-            nl = buf.find(b"\n")
-            if nl < 0:
-                break
-            line_bytes = bytes(buf[:nl])
-            del buf[: nl + 1]
-            text = line_bytes.decode("utf-8", errors="replace").strip()
-            packet = parse_psss(text)
-            if packet:
-                message = json.dumps(packet)
-                print(f"  -> {message}")
-                if clients:
-                    await asyncio.gather(*(c.send(message) for c in clients))
-            elif text:
-                if verbose:
-                    print(f"  [serial] {text[:300]}{'…' if len(text) > 300 else ''}")
-                raw_msg = json.dumps(
-                    {"raw": text, "timestamp": datetime.now().isoformat()}
-                )
-                if clients:
-                    await asyncio.gather(*(c.send(raw_msg) for c in clients))
+    # Resolve device
+    if address:
+        device = address
+        print(f"Connecting directly to {address}...")
+    else:
+        print(f"Scanning for PSSS-Sensor (service {BLE_SERVICE})...")
+        device = await BleakScanner.find_device_by_filter(
+            lambda d, adv: any(
+                BLE_SERVICE.lower() in str(s).lower()
+                for s in (adv.service_uuids or [])
+            ),
+            timeout=10.0,
+        )
+        if device is None:
+            print("ESP32-S3 not found by service UUID. Scanning all devices...\n")
+            found = await BleakScanner.discover(timeout=5.0)
+            for d in found:
+                print(f"  {d.address}  {d.name or '(no name)'}")
+            print(
+                "\nRun again with --ble-address <ADDRESS> to connect by address,"
+                "\nor pair the ESP32-S3 in System Settings > Bluetooth first."
+            )
+            return
 
-        # --- Extract complete binary frames (0xFF 0xFE …) ---
-        while True:
-            hi = buf.find(HEADER)
-            if hi < 0:
-                _trim_rx_buffer(buf)
-                break
-            if hi > 0:
-                del buf[:hi]
-            if len(buf) < FRAME_TOTAL:
-                break
-            if buf[0:2] != HEADER:
-                del buf[:1]
-                continue
-            frame = bytes(buf[:FRAME_TOTAL])
-            packet = parse_binary_frame(frame)
-            del buf[:FRAME_TOTAL]
-            if packet:
-                message = json.dumps(packet)
-                print(f"  -> {message}")
-                if clients:
-                    await asyncio.gather(*(c.send(message) for c in clients))
-
-        if not chunk:
-            await asyncio.sleep(0.02)
+    print(f"Found device: {getattr(device, 'name', device)} — connecting...")
+    async with BleakClient(device) as client:
+        print(f"Connected. Subscribing to {BLE_CHAR}...")
+        await client.start_notify(BLE_CHAR, on_notify)
+        print("Streaming BLE frames. Press Ctrl+C to stop.\n")
+        while client.is_connected:
+            await asyncio.sleep(1.0)
+    print("BLE device disconnected.")
 
 
-async def websocket_handler(websocket):
-    """Handle a WebSocket client connection."""
+# ── WebSocket server ───────────────────────────────────────────────────────────
+
+async def websocket_handler(websocket) -> None:
     clients.add(websocket)
-    print(f"[WS] Client connected ({len(clients)} total)")
+    print(f"[WS] client connected ({len(clients)} total)")
     try:
         await websocket.wait_closed()
     finally:
         clients.discard(websocket)
-        print(f"[WS] Client disconnected ({len(clients)} remaining)")
+        print(f"[WS] client disconnected ({len(clients)} remaining)")
 
 
-async def main(port: str, baud: int, verbose: bool) -> None:
-    print(f"Starting WebSocket server on ws://{WEBSOCKET_HOST}:{WEBSOCKET_PORT}")
+async def main(args) -> None:
+    print(f"WebSocket server → ws://{WEBSOCKET_HOST}:{WEBSOCKET_PORT}")
     async with websockets.serve(websocket_handler, WEBSOCKET_HOST, WEBSOCKET_PORT):
-        await serial_reader(port, baud, verbose)
+        await ble_reader(args.ble_address, args.verbose)
 
 
-def list_ports():
-    print("Available serial ports:")
-    for p in serial.tools.list_ports.comports():
-        print(f"  {p.device}  —  {p.description}")
-
+# ── CLI ───────────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="PSSS BLE/serial → WebSocket bridge")
-    parser.add_argument("--port", help="Serial port (e.g. /dev/tty.usbmodem14101 or COM3)")
-    parser.add_argument(
-        "--baud",
-        type=int,
-        default=115200,
-        help="Baud rate (default: 115200, match Teensy + HM-10 AT+BAUD4)",
-    )
-    parser.add_argument(
-        "--list-ports", action="store_true", help="List available serial ports and exit"
-    )
-    parser.add_argument(
-        "--verbose",
-        "-v",
-        action="store_true",
-        help="Print raw serial lines and byte counts to the terminal (debug)",
-    )
-    args = parser.parse_args()
+    parser = argparse.ArgumentParser(description="PSSS BLE sensor → WebSocket bridge")
 
-    if args.list_ports:
-        list_ports()
-    elif not args.port:
-        print("Error: --port is required. Use --list-ports to see available ports.")
-        list_ports()
-    else:
-        asyncio.run(main(args.port, args.baud, args.verbose))
+    parser.add_argument("--ble-address", metavar="ADDR",
+                        help="Skip scan and connect directly by BLE address (e.g. AA:BB:CC:DD:EE:FF)")
+    parser.add_argument("--verbose", "-v", action="store_true", help="Verbose debug output")
+    args = parser.parse_args()
+    asyncio.run(main(args))
