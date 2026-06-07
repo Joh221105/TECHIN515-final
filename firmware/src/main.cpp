@@ -23,7 +23,6 @@
 #define NEO_COUNT         1
 #define THERMAL_TX_W      16
 #define THERMAL_TX_H      12
-#define THERMAL_TX_PIXELS (THERMAL_TX_W * THERMAL_TX_H)
 #define CONTROL_MS        100        // 10 Hz
 #define THERMAL_MS        250        // 4 Hz
 #define BASELINE_SAMPLES  (10000 / THERMAL_MS)
@@ -112,7 +111,7 @@ void emitThermalFrame() {
                 for (int dc = 0; dc < 2; dc++)
                     t += thermal_frame[(row * 2 + dr) * 32 + (col * 2 + dc)];
             t *= 0.25f;
-            int16_t px = (int16_t)(t * 10.0f);
+            int16_t px = (int16_t)(t * 10.0f + 0.5f);
             memcpy(&buf[12 + (row * THERMAL_TX_W + col) * 2], &px, 2);
         }
     }
@@ -131,7 +130,7 @@ void setup() {
     strip.setPixelColor(0, 0x000000);
     strip.show();
 
-    AudioMemory(16);
+    AudioMemory(24);
     fft.windowFunction(AudioWindowHanning1024);
 
     Wire.begin();
