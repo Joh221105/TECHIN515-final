@@ -27,17 +27,13 @@ BLE_SERVICE = "0000ffe0-0000-1000-8000-00805f9b34fb"
 BLE_CHAR    = "0000ffe1-0000-1000-8000-00805f9b34fb"
 
 # Binary frame layout (must match firmware)
-HEADER_THERMAL = b"\xff\xfe"
-HEADER_CONTROL = b"\xff\xfc"
-FRAME_META_THERMAL = 13   # snr f32 + peak f32 + thermal_ts u32 + flags u8
-FRAME_META_CONTROL = 9    # snr f32 + peak f32 + flags u8
-SPECTRUM_BYTES = 24
-THERMAL_W      = 16
-THERMAL_H      = 12
-THERMAL_PIXELS = THERMAL_W * THERMAL_H
-FRAME_BODY_THERMAL = THERMAL_PIXELS * 2  # int16 thermal payload
-FRAME_TOTAL_THERMAL = 2 + FRAME_META_THERMAL + SPECTRUM_BYTES + FRAME_BODY_THERMAL  # 423
-FRAME_TOTAL_CONTROL = 2 + FRAME_META_CONTROL + SPECTRUM_BYTES  # 35
+HEADER_THERMAL      = b"\xff\xfe"
+HEADER_CONTROL      = b"\xff\xfc"
+THERMAL_W           = 32
+THERMAL_H           = 24
+THERMAL_PIXELS      = THERMAL_W * THERMAL_H
+FRAME_TOTAL_THERMAL = 1548  # 2+4+4+1+1+1536
+FRAME_TOTAL_CONTROL = 36    # 2+4+4+1+1+24
 
 # All connected WebSocket clients
 clients: set = set()
@@ -49,61 +45,37 @@ def parse_thermal_frame(chunk: bytes) -> dict | None:
     """Decode one thermal frame (0xFF 0xFE) into a JSON-ready dict."""
     if len(chunk) != FRAME_TOTAL_THERMAL or chunk[0:2] != HEADER_THERMAL:
         return None
-    snr, peak, thermal_ts_ms, flags = struct.unpack_from("<ffIB", chunk, 2)
-    spectrum = list(chunk[15: 15 + SPECTRUM_BYTES])
-    off = 15 + SPECTRUM_BYTES
+    band_energy, thermal_ts_ms, proximity_zone, flags = struct.unpack_from("<fIBB", chunk, 2)
     temps: list[float] = []
     for i in range(THERMAL_PIXELS):
-        (px,) = struct.unpack_from("<h", chunk, off + i * 2)
+        (px,) = struct.unpack_from("<h", chunk, 12 + i * 2)
         temps.append(px / 10.0)
-    min_t = min(temps)
-    acoustic = bool(flags & 1)
-    thermal  = bool(flags & 2)
-    status   = 0 if acoustic else 1
     return {
-        "kind":            "thermal",
-        "timestamp":       datetime.now().isoformat(),
-        "status":          status,
-        "snr":             snr,
-        "peak_freq":       peak,
-        "thermal_ts_ms":   thermal_ts_ms,
-        "min_temp":        min_t,
-        # legacy aliases
-        "value1":          snr,
-        "value2":          peak,
-        "value3":          min_t,
-        "flags":           flags,
-        "acoustic_leak":   acoustic,
-        "thermal_anomaly": thermal,
-        "spectrum":        spectrum,
-        "thermal":         temps,
-        "thermal_w":       THERMAL_W,
-        "thermal_h":       THERMAL_H,
-        "raw":             f"$PSSS,{status},{snr:.2f},{peak:.0f},{min_t:.2f}*",
+        "kind":           "thermal",
+        "timestamp":      datetime.now().isoformat(),
+        "band_energy":    round(float(band_energy), 4),
+        "thermal_ts_ms":  thermal_ts_ms,
+        "proximity_zone": proximity_zone,
+        "leak_detected":  bool(flags & 1),
+        "thermal":        temps,
+        "thermal_w":      THERMAL_W,
+        "thermal_h":      THERMAL_H,
     }
 
 def parse_control_frame(chunk: bytes) -> dict | None:
     """Decode one control frame (0xFF 0xFC) into a JSON-ready dict."""
     if len(chunk) != FRAME_TOTAL_CONTROL or chunk[0:2] != HEADER_CONTROL:
         return None
-    snr, peak, flags = struct.unpack_from("<ffB", chunk, 2)
-    spectrum = list(chunk[11: 11 + SPECTRUM_BYTES])
-    acoustic = bool(flags & 1)
-    thermal = bool(flags & 2)
-    status = 0 if acoustic else 1
+    band_energy, peak_freq_hz, proximity_zone, flags = struct.unpack_from("<ffBB", chunk, 2)
+    spectrum = list(chunk[12:36])
     return {
-        "kind":            "control",
-        "timestamp":       datetime.now().isoformat(),
-        "status":          status,
-        "snr":             snr,
-        "peak_freq":       peak,
-        "value1":          snr,
-        "value2":          peak,
-        "flags":           flags,
-        "acoustic_leak":   acoustic,
-        "thermal_anomaly": thermal,
-        "spectrum":        spectrum,
-        "raw":             f"$PSSS,{status},{snr:.2f},{peak:.0f},*",
+        "kind":           "control",
+        "timestamp":      datetime.now().isoformat(),
+        "band_energy":    round(float(band_energy), 4),
+        "peak_freq_hz":   round(float(peak_freq_hz), 1),
+        "proximity_zone": proximity_zone,
+        "leak_detected":  bool(flags & 1),
+        "spectrum":       spectrum,
     }
 
 
@@ -134,7 +106,7 @@ async def _dispatch_frames(buf: bytearray, verbose: bool) -> None:
         if packet and clients:
             msg = json.dumps(packet)
             if verbose:
-                print(f"  [{packet['kind']}] snr={packet['snr']:.1f} status={packet['status']}")
+                print(f"  [{packet['kind']}] energy={packet['band_energy']:.3f} zone={packet['proximity_zone']}")
             await asyncio.gather(*(c.send(msg) for c in clients))
 
 

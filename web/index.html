@@ -15,6 +15,7 @@
   --accent:  #00e5ff;
   --warn:    #ff4757;
   --ok:      #00e676;
+  --near:    #ffa000;
   --mono:    'Space Mono', monospace;
   --sans:    'Syne', sans-serif;
 }
@@ -240,43 +241,100 @@ main {
   color: var(--text); letter-spacing: -0.02em;
   transition: color 0.3s;
 }
+.snr-number.near { color: var(--near); }
 .snr-number.leak { color: var(--warn); }
 .snr-unit { font-family: var(--mono); font-size: 0.8rem; color: var(--muted); }
 
-.spectrum-wrap {
+/* ── Intensity gauge ── */
+.gauge-wrap {
   flex: 1;
+  display: flex;
+  gap: 10px;
+  min-height: 0;
+}
+
+.gauge-bar-col {
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  align-items: stretch;
+  gap: 4px;
+  flex: 1;
   min-height: 0;
 }
-.spectrum-bars {
-  flex: 1;
-  display: flex;
-  align-items: flex-end;
-  gap: 3px;
-  min-height: 0;
-}
-.spec-bar {
-  flex: 1;
-  border-radius: 2px 2px 0 0;
-  background: var(--border);
-  min-height: 2px;
-  transition: height 0.12s ease-out, background 0.2s;
-}
-.spec-bar.active      { background: var(--accent); box-shadow: 0 0 4px rgba(0,229,255,0.4); }
-.spec-bar.active.leak { background: var(--warn);   box-shadow: 0 0 4px rgba(255,71,87,0.4); }
 
-.spectrum-footer {
-  display: flex; justify-content: space-between;
-  font-family: var(--mono); font-size: 0.7rem; color: var(--muted);
+.gauge-edge-label {
+  font-family: var(--mono);
+  font-size: 0.68rem;
+  color: var(--muted);
+  text-align: center;
+  flex-shrink: 0;
 }
 
-.snr-threshold {
-  display: flex; align-items: center; gap: 8px;
-  font-family: var(--mono); font-size: 0.75rem; color: var(--muted);
+.gauge-track {
+  flex: 1;
+  background: rgba(255,255,255,0.04);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  position: relative;
+  min-height: 40px;
+  overflow: hidden;
 }
-.threshold-pip { width: 10px; height: 2px; background: var(--warn); border-radius: 1px; }
+
+.gauge-fill {
+  position: absolute;
+  bottom: 0; left: 0; right: 0;
+  border-radius: 5px;
+  background: var(--ok);
+  box-shadow: none;
+  transition: height 0.12s ease-out, background 0.25s, box-shadow 0.25s;
+}
+.gauge-fill.near {
+  background: var(--near);
+  box-shadow: 0 0 10px rgba(255,160,0,0.35);
+}
+.gauge-fill.leak {
+  background: var(--warn);
+  box-shadow: 0 0 16px rgba(255,71,87,0.5);
+  animation: pulse-leak 0.9s ease-in-out infinite alternate;
+}
+@keyframes pulse-leak {
+  from { opacity: 1; }
+  to   { opacity: 0.55; }
+}
+
+/* threshold marker line */
+.gauge-thr-line {
+  position: absolute;
+  left: 0; right: 0;
+  height: 2px;
+  background: rgba(255,71,87,0.65);
+  /* 6 dB / 15 dB = 40% from bottom */
+  bottom: 40%;
+  border-radius: 1px;
+}
+.gauge-thr-line::after {
+  content: 'THR';
+  position: absolute;
+  right: 5px;
+  bottom: 4px;
+  font-family: var(--mono);
+  font-size: 0.6rem;
+  color: rgba(255,71,87,0.8);
+  letter-spacing: 0.06em;
+}
+
+.gauge-zone-tag {
+  font-family: var(--mono);
+  font-size: 0.7rem;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--muted);
+  text-align: center;
+  flex-shrink: 0;
+  transition: color 0.25s;
+}
+.gauge-zone-tag.near { color: var(--near); }
+.gauge-zone-tag.leak { color: var(--warn); }
 
 /* scrollbar */
 ::-webkit-scrollbar { width: 4px; }
@@ -329,19 +387,21 @@ main {
 
       <!-- Microphone -->
       <div class="mic-section">
-        <span class="section-label">Microphone</span>
+        <span class="section-label">Intensity</span>
         <div class="snr-row">
           <span class="snr-number" id="snr-number">—</span>
           <span class="snr-unit">dB SNR</span>
         </div>
-        <div class="snr-threshold">
-          <div class="threshold-pip"></div>
-          Threshold: 6 dB
-        </div>
-        <div class="spectrum-wrap">
-          <div class="spectrum-bars" id="spectrum-bars"></div>
-          <div class="spectrum-footer">
-            <span>10 kHz</span><span>49 kHz</span>
+
+        <div class="gauge-wrap">
+          <div class="gauge-bar-col">
+            <span class="gauge-edge-label">15 dB</span>
+            <div class="gauge-track">
+              <div class="gauge-thr-line"></div>
+              <div class="gauge-fill" id="gauge-fill"></div>
+            </div>
+            <span class="gauge-edge-label">0 dB</span>
+            <span class="gauge-zone-tag" id="gauge-zone">CLEAR</span>
           </div>
         </div>
       </div>
@@ -353,9 +413,10 @@ main {
 <script>
 'use strict';
 
-const SPEC_BINS      = 24;
-const DEFAULT_THERMAL_W = 16;
-const DEFAULT_THERMAL_H = 12;
+const GAUGE_MAX_DB       = 15;
+const GAUGE_THRESHOLD_DB = 6;
+const DEFAULT_THERMAL_W  = 16;
+const DEFAULT_THERMAL_H  = 12;
 const WS_URL = 'ws://localhost:8765';
 
 const CMAP_STOPS = [0, 0.25, 0.5, 0.75, 1];
@@ -382,26 +443,26 @@ const leakBadge     = document.getElementById('leak-badge');
 const leakIcon      = document.getElementById('leak-icon');
 const leakText      = document.getElementById('leak-text');
 const snrNumber     = document.getElementById('snr-number');
+const gaugeFill     = document.getElementById('gauge-fill');
+const gaugeZone     = document.getElementById('gauge-zone');
 
-// Build 24 spectrum bars
-const specBarsEl = document.getElementById('spectrum-bars');
-const specBars = Array.from({ length: SPEC_BINS }, () => {
-  const b = document.createElement('div');
-  b.className = 'spec-bar';
-  specBarsEl.appendChild(b);
-  return b;
-});
+function updateGauge(snrDb, zone) {
+  const pct = Math.max(0, Math.min(1, snrDb / GAUGE_MAX_DB)) * 100;
+  gaugeFill.style.height = pct + '%';
 
-function updateSpectrum(spectrum, acousticAlert) {
-  const containerH = specBarsEl.clientHeight || 100;
-  specBars.forEach((b, i) => {
-    const val = spectrum ? spectrum[i] : 0;
-    const h = Math.max(2, (val / 255) * containerH);
-    b.style.height = h + 'px';
-    b.className = val > 20
-      ? ('spec-bar active' + (acousticAlert ? ' leak' : ''))
-      : 'spec-bar';
-  });
+  if (zone === 2) {
+    gaugeFill.className = 'gauge-fill leak';
+    gaugeZone.className = 'gauge-zone-tag leak';
+    gaugeZone.textContent = 'LEAK';
+  } else if (zone === 1) {
+    gaugeFill.className = 'gauge-fill near';
+    gaugeZone.className = 'gauge-zone-tag near';
+    gaugeZone.textContent = 'NEAR';
+  } else {
+    gaugeFill.className = 'gauge-fill';
+    gaugeZone.className = 'gauge-zone-tag';
+    gaugeZone.textContent = 'CLEAR';
+  }
 }
 
 function interp(t, xs, ys) {
@@ -489,27 +550,9 @@ function drawThermalCanvas(temps, gw, gh) {
   idleOverlay.classList.add('hidden');
 }
 
-// $PSSS,status,snr_db,peak_freq,obj_temp,spec[0],...,spec[23]*
-function parsePsssLine(line) {
-  const s = line.trim().replace(/\*$/, '');
-  if (!s.startsWith('$PSSS,')) return null;
-  const parts = s.split(',');
-  if (parts.length < 7 + SPEC_BINS) return null;
-  const status   = parseInt(parts[1], 10);   // 0 = leak alert, 1 = ok
-  const snr      = parseFloat(parts[2]);
-  const cold_col = parseInt(parts[5], 10);
-  const cold_row = parseInt(parts[6], 10);
-  const spectrum = new Array(SPEC_BINS);
-  for (let i = 0; i < SPEC_BINS; i++) {
-    spectrum[i] = parseInt(parts[7 + i], 10);
-    if (Number.isNaN(spectrum[i])) return null;
-  }
-  return { status, snr, cold_col, cold_row, spectrum };
-}
-
 function updateUI(packet) {
   const isLeak = packet.status === 0;
-  const acousticAlert = packet.snr >= 6;
+  const zone   = packet.zone ?? (isLeak ? 2 : 0);
 
   if (isLeak) {
     leakBadge.className = 'leak-badge leak';
@@ -522,10 +565,9 @@ function updateUI(packet) {
   }
 
   snrNumber.textContent = Number.isFinite(packet.snr) ? packet.snr.toFixed(1) : '—';
-  snrNumber.className = 'snr-number' + (acousticAlert ? ' leak' : '');
+  snrNumber.className = 'snr-number' + (zone === 2 ? ' leak' : zone === 1 ? ' near' : '');
 
-  updateSpectrum(packet.spectrum, acousticAlert);
-
+  updateGauge(packet.snr, zone);
 }
 
 function renderLoop() {
@@ -560,7 +602,7 @@ function setConnected(on) {
   if (!on) {
     idleOverlay.classList.remove('hidden');
     snrNumber.textContent = '—';
-    updateSpectrum(null, false);
+    updateGauge(0, 0);
   }
 }
 
@@ -574,7 +616,6 @@ function connectBLE() {
   wsConn.onmessage = (ev) => {
     try {
       const d = JSON.parse(ev.data);
-      if (!('status' in d)) { console.warn('[BLE] no status field', Object.keys(d)); return; }
       const kind = d.kind || '';
       if ((kind === 'thermal' || !kind) && Number.isFinite(d.thermal_ts_ms)) thermalTsMs = d.thermal_ts_ms;
       if ((kind === 'thermal' || !kind) && d.thermal && Array.isArray(d.thermal)) {
@@ -592,7 +633,12 @@ function connectBLE() {
         }
       }
       if (kind === 'control' || !kind) {
-        updateUI({ status: d.status, snr: d.snr ?? d.value1 ?? 0, spectrum: d.spectrum || [] });
+        const isLeak = d.leak_detected || d.proximity_zone === 2;
+        updateUI({
+          status: isLeak ? 0 : 1,
+          snr:    d.band_energy ?? d.snr ?? 0,
+          zone:   d.proximity_zone ?? 0,
+        });
       }
     } catch (err) { console.error('[BLE] parse/render error:', err, ev.data.slice(0, 200)); }
   };
@@ -610,7 +656,7 @@ btnConnectBle.addEventListener('click', connectBLE);
 btnDisconnect.addEventListener('click', disconnectBLE);
 
 drawColorbar(15, 35);
-updateSpectrum(null, false);
+updateGauge(0, 0);
 requestAnimationFrame(renderLoop);
 </script>
 </body>
