@@ -16,8 +16,8 @@
 #define CHAR_UUID     "0000ffe1-0000-1000-8000-00805f9b34fb"
 
 // Binary frame constants (must match Teensy firmware)
-#define FRAME_TOTAL_THERMAL  396  // 0xFF 0xFE
-#define FRAME_TOTAL_CONTROL   12  // 0xFF 0xFC
+#define FRAME_TOTAL_THERMAL  1548  // 0xFF 0xFE
+#define FRAME_TOTAL_CONTROL   36  // 0xFF 0xFC
 #define FRAME_TOTAL_MAX      FRAME_TOTAL_THERMAL
 
 // Max bytes per BLE notification (default MTU 23 is too small; 512 needs MTU negotiation)

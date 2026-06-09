@@ -1,18 +1,8 @@
 """
-MLX90640 Real-Time Thermal Heatmap Viewer (OpenCV)
----------------------------------------------------
-Reads binary HM-10 frames (0xFF 0xFE + metadata + 24 spectrum bytes + 768×int16 °C×10) from serial,
-or legacy ASCII lines ``FRAME:`` + comma-separated floats (24×32).
-
-Usage:
-    pip install pyserial opencv-python numpy
-    python thermal_viewer.py --port /dev/tty.usbserial-* --protocol binary   # HM-10 dongle / UART
-    python thermal_viewer.py --port /dev/tty.usbmodem* --protocol binary   # if serial carries binary
-    python thermal_viewer.py --port COM3 --protocol frame                  # legacy ASCII only
-
-Binary mode matches ``firmware/src/main.cpp`` and ``streamlit/app.html`` (1571 bytes per frame).
-Teensy USB CDC normally carries text + ``$PSSS`` lines only; use a USB–serial adapter on
-UART1/HM-10 to view the heatmap in binary mode.
+MLX90640 Handheld Thermal Wand - Alcohol Leak Detector Edition
+--------------------------------------------------------------
+Optimized for spotting rapid evaporative cooling caused by air pushing 
+through an alcohol-wetted puncture.
 """
 
 import argparse
@@ -28,15 +18,17 @@ import serial
 ROWS, COLS = 24, 32
 DISPLAY_W, DISPLAY_H = 640, 480
 BAUD = 115200
-COLORMAP = cv2.COLORMAP_INFERNO  # swap to COLORMAP_JET, COLORMAP_HOT, etc.
+
+# JET colormap goes from Blue (Cold) -> Green -> Yellow -> Red (Hot)
+# Perfect for spotting the dark blue "ice spot" of evaporating alcohol.
+COLORMAP = cv2.COLORMAP_JET
 
 HEADER = b"\xff\xfe"
-FRAME_META = 9
-SPECTRUM_BYTES = 24
-FRAME_BODY = 768 * 2
-FRAME_TOTAL = 2 + FRAME_META + SPECTRUM_BYTES + FRAME_BODY
+FRAME_META = 10        # snr_db(4) + ts_ms(4) + zone(1) + flags(1)
+FRAME_BODY = ROWS * COLS * 2
+FRAME_TOTAL = 2 + FRAME_META + FRAME_BODY  # 396
 
-frame_queue: queue.Queue = queue.Queue(maxsize=4)
+frame_queue = queue.Queue(maxsize=4)
 
 
 def _push_frame(frame: np.ndarray) -> None:
@@ -76,8 +68,8 @@ def serial_reader_binary(port: str) -> None:
             del buf[:FRAME_TOTAL]
             try:
                 floats = []
-                off = 11 + SPECTRUM_BYTES
-                for _ in range(768):
+                off = 2 + FRAME_META
+                for _ in range(ROWS * COLS):
                     (px,) = struct.unpack_from("<h", chunk, off)
                     off += 2
                     floats.append(px / 10.0)
@@ -128,8 +120,8 @@ def run_viewer(port: str, protocol: str) -> None:
     t = threading.Thread(target=target, args=(port,), daemon=True)
     t.start()
 
-    cv2.namedWindow("MLX90640 Thermal", cv2.WINDOW_NORMAL)
-    cv2.resizeWindow("MLX90640 Thermal", DISPLAY_W, DISPLAY_H)
+    cv2.namedWindow("Thermal Wand - Leak Detector", cv2.WINDOW_NORMAL)
+    cv2.resizeWindow("Thermal Wand - Leak Detector", DISPLAY_W, DISPLAY_H)
 
     last_frame = None
 
@@ -141,35 +133,47 @@ def run_viewer(port: str, protocol: str) -> None:
             frame = last_frame
 
         if frame is not None:
-            lo, hi = float(frame.min()), float(frame.max())
-            spread = hi - lo if hi - lo > 0.5 else 0.5
+            # --- ALCOHOL ALGORITHM MODIFICATIONS ---
+            # Use the median tire temperature as our baseline anchor
+            median_temp = np.median(frame)
+            coldest_spot = float(frame.min())
+            
+            # Alcohol evaporation drops the temperature quickly. 
+            # We enforce a strict, narrow 4.0°C window around the tire's ambient baseline.
+            # Anything colder than (median - 3.5°C) will completely saturate to deep blue.
+            lo = median_temp - 3.5
+            hi = median_temp + 0.5
+            spread = hi - lo
 
+            # Normalize the frame to this specific target window
             norm = ((frame - lo) / spread * 255).clip(0, 255).astype(np.uint8)
             colored = cv2.applyColorMap(norm, COLORMAP)
+            
+            # INTER_CUBIC smooths out the 32x24 blocks into a readable fluid plume
             display = cv2.resize(
-                colored, (DISPLAY_W, DISPLAY_H), interpolation=cv2.INTER_LINEAR
+                colored, (DISPLAY_W, DISPLAY_H), interpolation=cv2.INTER_CUBIC
             )
 
+            # --- USER INTERFACE FOR THE WAND ---
+            # Print standard metrics
             cv2.putText(
-                display,
-                f"min {lo:.1f}C",
-                (10, 28),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.7,
-                (255, 255, 255),
-                2,
+                display, f"Tire Baseline: {median_temp:.1f}C", (10, 28),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2
             )
             cv2.putText(
-                display,
-                f"max {hi:.1f}C",
-                (10, 56),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.7,
-                (255, 255, 255),
-                2,
+                display, f"Coldest Point: {coldest_spot:.1f}C", (10, 56),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2
             )
 
-            cv2.imshow("MLX90640 Thermal", display)
+            # Look for a sharp negative delta (Coldest spot is significantly below tire baseline)
+            delta = median_temp - coldest_spot
+            if delta > 2.5:  # Adjust this threshold if it triggers on ambient variations
+                cv2.putText(
+                    display, "!!! LEAK DETECTED !!!", (10, DISPLAY_H - 20),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 3
+                )
+
+            cv2.imshow("Thermal Wand - Leak Detector", display)
 
         if cv2.waitKey(1) & 0xFF == ord("q"):
             break

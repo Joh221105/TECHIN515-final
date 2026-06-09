@@ -29,11 +29,11 @@ BLE_CHAR    = "0000ffe1-0000-1000-8000-00805f9b34fb"
 # Binary frame layout (must match firmware)
 HEADER_THERMAL      = b"\xff\xfe"
 HEADER_CONTROL      = b"\xff\xfc"
-THERMAL_W           = 16
-THERMAL_H           = 12
+THERMAL_W           = 32
+THERMAL_H           = 24
 THERMAL_PIXELS      = THERMAL_W * THERMAL_H
-FRAME_TOTAL_THERMAL = 396   # 2+4+4+1+1+384
-FRAME_TOTAL_CONTROL = 12    # 2+4+4+1+1
+FRAME_TOTAL_THERMAL = 1548  # 2+4+4+1+1+1536
+FRAME_TOTAL_CONTROL = 36    # 2+4+4+1+1+24
 
 # All connected WebSocket clients
 clients: set = set()
@@ -67,6 +67,7 @@ def parse_control_frame(chunk: bytes) -> dict | None:
     if len(chunk) != FRAME_TOTAL_CONTROL or chunk[0:2] != HEADER_CONTROL:
         return None
     band_energy, peak_freq_hz, proximity_zone, flags = struct.unpack_from("<ffBB", chunk, 2)
+    spectrum = list(chunk[12:36])
     return {
         "kind":           "control",
         "timestamp":      datetime.now().isoformat(),
@@ -74,6 +75,7 @@ def parse_control_frame(chunk: bytes) -> dict | None:
         "peak_freq_hz":   round(float(peak_freq_hz), 1),
         "proximity_zone": proximity_zone,
         "leak_detected":  bool(flags & 1),
+        "spectrum":       spectrum,
     }
 
 
