@@ -21,17 +21,14 @@ class UltrasonicConfigTest(unittest.TestCase):
             r"#define\s+SAMPLE_RATE\s+\(\(float\)AUDIO_SAMPLE_RATE_EXACT\)",
         )
 
-    def test_profiles_target_ultrasonic_leak_band(self):
-        profile_lines = [
-            line.strip()
-            for line in self.main_cpp.splitlines()
-            if line.strip().startswith('{"')
-        ]
-        ultrasonic_profiles = [
-            line for line in profile_lines
-            if "20000.0f" in line and "36000.0f" in line
-        ]
-        self.assertGreaterEqual(len(ultrasonic_profiles), 2)
+    def test_single_hardcoded_profile_4_targets_high_core_band(self):
+        self.assertIn("static const int ACTIVE_PROFILE_ID = 4;", self.main_cpp)
+        self.assertRegex(
+            self.main_cpp,
+            r'static const DspExperimentProfile ACTIVE_PROFILE = \{\s*"ULTRASONIC_HIGH_CORE",\s+26000\.0f,\s+35500\.0f,\s+12000\.0f,\s+19000\.0f,\s+7\.0f,\s+9,\s+0,\s+0,\s+0\.018f,\s+0\.003f,\s+15\.0f,\s+true,\s+true,\s+false\s+\};',
+        )
+        self.assertIn("static int activeProfileId = ACTIVE_PROFILE_ID;", self.main_cpp)
+        self.assertIn("static const DspExperimentProfile* activeProfile = &ACTIVE_PROFILE;", self.main_cpp)
 
     def test_status_output_exposes_detection_components(self):
         for field in (
@@ -51,10 +48,16 @@ class UltrasonicConfigTest(unittest.TestCase):
     def test_status_updates_are_more_responsive(self):
         self.assertIn("#define PRINT_INTERVAL_MS      100", self.main_cpp)
 
-    def test_profiles_have_lower_latency_confirmation_counts(self):
-        self.assertIn('"ULTRASONIC_BALANCED",      22000.0f, 34000.0f, 12000.0f, 19000.0f, 6.5f,  8', self.main_cpp)
-        self.assertIn('"ULTRASONIC_STABLE",        24000.0f, 34000.0f, 12000.0f, 19000.0f, 8.0f, 12', self.main_cpp)
-        self.assertIn('"ULTRASONIC_SENSITIVE",     20000.0f, 36000.0f, 10000.0f, 18000.0f, 4.5f, 10', self.main_cpp)
+    def test_profile_table_and_default_macro_are_removed(self):
+        self.assertNotIn("EXPERIMENT_PROFILE_ID", self.main_cpp)
+        self.assertNotIn("EXPERIMENT_PROFILES", self.main_cpp)
+        self.assertNotIn("PROFILE_COUNT", self.main_cpp)
+        self.assertNotIn("setActiveProfile", self.main_cpp)
+
+    def test_serial_commands_do_not_switch_profiles(self):
+        self.assertNotIn("choose profile", self.main_cpp)
+        self.assertNotIn("profile_changed", self.main_cpp)
+        self.assertNotIn("cmd >= '0'", self.main_cpp)
 
     def test_led_has_gradient_smoothing_and_strong_signal_blink(self):
         for token in (
@@ -74,12 +77,6 @@ class UltrasonicConfigTest(unittest.TestCase):
         self.assertIn("last_strong_signal_ms", self.main_cpp)
         self.assertIn("updateLED(new_fft)", self.main_cpp)
         self.assertNotIn("if (new_fft) updateLED();", self.main_cpp)
-
-    def test_pinpoint_profile_averages_narrow_higher_band(self):
-        self.assertIn(
-            '"PINPOINT_HIGH_BAND",      28000.0f, 36000.0f, 18000.0f, 26000.0f, 1.0f,  4, 0.018f, 0.002f, 8.0f, true',
-            self.main_cpp,
-        )
 
     def test_pinpoint_detection_uses_top_bin_average(self):
         for token in (
@@ -122,7 +119,8 @@ class UltrasonicConfigTest(unittest.TestCase):
 
     def test_pinpoint_profile_ignores_raw_level_rise_for_detection_score(self):
         for token in (
-            "combined_snr_db = fmaxf(0.0f, fmaxf(spectral_snr_db, level_rise_db));",
+            "float effective_level_rise  = activeProfile->useLevelRise      ? level_rise_db    : 0.0f;",
+            "combined_snr_db = fmaxf(0.0f, fmaxf(spectral_snr_db, effective_level_rise));",
             "combined_snr_db = fmaxf(combined_snr_db, peak_snr_db);",
             "snr_db = isPinpointProfile() ? pinpoint_metric_db : combined_snr_db;",
             "PINPOINT=%.1f",

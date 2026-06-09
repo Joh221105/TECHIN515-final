@@ -21,26 +21,21 @@
 // inside the SPH0641 ultrasonic-mode range of 3.072-4.8 MHz.
 
 // Experiment procedure:
-// 1. Start with profile 1.
+// 1. Firmware starts with the fixed profile 4 parameters.
 // 2. Press r to reset acoustic state.
 // 3. Move the mic around the tire.
 // 4. Watch the NeoPixel and STATUS lines.
-// 5. If it false-triggers, try profile 2. If it misses leaks, try profile 3.
 //
 // Best profile criteria:
 // - No leak: no sustained red / LEAK status.
 // - Real puncture leak: fast red / LEAK status.
 // - Handling noise: should not cause sustained red.
 
-#ifndef EXPERIMENT_PROFILE_ID
-#define EXPERIMENT_PROFILE_ID 8
-#endif
-
 // ── DSP Config ───────────────────────────────────────────────
 #define SAMPLE_RATE          ((float)AUDIO_SAMPLE_RATE_EXACT)
 #define FFT_SIZE              1024
 #define AMBIENT_BOOT_FRAMES     20   // frames to warm up ambient estimate
-#define MAX_WINDOW_SIZE         32   // max sliding-window depth across all profiles
+#define MAX_WINDOW_SIZE         32   // max sliding-window depth
 #define SPECTRUM_BINS           24   // downsampled bars sent over BLE
 #define PINPOINT_TOP_BINS         3   // strongest bins averaged for narrow pinhole leaks
 #define PINPOINT_PROFILE_ID       6
@@ -82,7 +77,7 @@
 // ── Derived DSP constant ──────────────────────────────────────
 #define BIN_RES          ((float)SAMPLE_RATE / FFT_SIZE)
 
-// ── Experiment profiles ───────────────────────────────────────
+// ── Experiment profile ────────────────────────────────────────
 struct DspExperimentProfile {
     const char* name;
     float signalBandLowHz;
@@ -101,23 +96,23 @@ struct DspExperimentProfile {
     bool useAudibleFallback;
 };
 
-static const DspExperimentProfile EXPERIMENT_PROFILES[] = {
-    //                                                                         confirm rel  win
-    {"ULTRASONIC_WIDE",          20000.0f, 36000.0f, 12000.0f, 19000.0f, 6.0f,   7,  0,  0, 0.025f, 0.004f,  14.0f, true,  true,  false},
-    {"ULTRASONIC_BALANCED",      22000.0f, 34000.0f, 12000.0f, 19000.0f, 6.5f,   8,  0,  0, 0.020f, 0.003f,  14.0f, true,  true,  false},
-    {"ULTRASONIC_STABLE",        24000.0f, 34000.0f, 12000.0f, 19000.0f, 8.0f,  12,  0,  0, 0.015f, 0.002f,  16.0f, true,  true,  false},
-    {"ULTRASONIC_SENSITIVE",     20000.0f, 36000.0f, 10000.0f, 18000.0f, 4.5f,  10,  0,  0, 0.020f, 0.003f,  12.0f, true,  true,  false},
-    {"ULTRASONIC_HIGH_CORE",     26000.0f, 35500.0f, 12000.0f, 19000.0f, 7.0f,   9,  0,  0, 0.018f, 0.003f,  15.0f, true,  true,  false},
-    {"ULTRASONIC_STRICT_CLOSE",  26000.0f, 34000.0f, 12000.0f, 19000.0f, 10.0f, 10,  0,  0, 0.012f, 0.002f,  18.0f, true,  true,  false},
-    {"PINPOINT_HIGH_BAND",       28000.0f, 36000.0f, 18000.0f, 26000.0f, 1.0f,   4,  0,  0, 0.018f, 0.002f,   8.0f, true,  true,  false},
-    {"ULTRASONIC_MODERATE",      23000.0f, 34000.0f, 12000.0f, 19000.0f, 6.0f,   4,  0,  0, 0.018f, 0.0025f, 15.0f, true,  false, true},
-    // Acoustic area-finder: 4/10 confirm, 2/10 release — tolerates bursty signal; thermal pinpoints cold spot
-    {"SENSITIVE_WINDOW",         20000.0f, 36000.0f, 10000.0f, 18000.0f, 5.5f,   4,  2, 10, 0.020f, 0.003f,  12.0f, true,  true,  false},
+static const int ACTIVE_PROFILE_ID = 4;
+static const DspExperimentProfile ACTIVE_PROFILE = {
+    "ULTRASONIC_HIGH_CORE",
+    26000.0f, 35500.0f,
+    12000.0f, 19000.0f,
+    7.0f,
+    9, 0, 0,
+    0.018f,
+    0.003f,
+    15.0f,
+    true,
+    true,
+    false
 };
 
-static const int PROFILE_COUNT = sizeof(EXPERIMENT_PROFILES) / sizeof(EXPERIMENT_PROFILES[0]);
-static int activeProfileId = 1;
-static const DspExperimentProfile* activeProfile = &EXPERIMENT_PROFILES[1];
+static int activeProfileId = ACTIVE_PROFILE_ID;
+static const DspExperimentProfile* activeProfile = &ACTIVE_PROFILE;
 static int sig_bin_low = 0;
 static int sig_bin_high = 0;
 static int noise_bin_low = 0;
@@ -186,10 +181,6 @@ static unsigned long last_control_ms = 0;
 static unsigned long last_print_ms   = 0;
 
 // ── Helpers ───────────────────────────────────────────────────
-static int normalizeProfileId(int id) {
-    return (id >= 0 && id < PROFILE_COUNT) ? id : 1;
-}
-
 static float clamp01(float value) {
     if (value < 0.0f) return 0.0f;
     if (value > 1.0f) return 1.0f;
@@ -252,13 +243,6 @@ static void resetAcousticState() {
     led_intensity_smoothed = 0.0f;
     last_strong_signal_ms = 0;
     resetExperimentCounters();
-}
-
-static void setActiveProfile(int id, bool resetState) {
-    activeProfileId = normalizeProfileId(id);
-    activeProfile = &EXPERIMENT_PROFILES[activeProfileId];
-    computeProfileBins();
-    if (resetState) resetAcousticState();
 }
 
 static float bandPower(const float32_t* mag, int lo, int hi) {
@@ -640,7 +624,6 @@ static void printActiveProfile() {
 
 static void printHelp() {
     Serial.println("COMMANDS:");
-    Serial.printf("0-%d choose profile\n", PROFILE_COUNT - 1);
     Serial.println("r reset before testing");
     Serial.println("p show profile");
     Serial.println("s show simple summary");
@@ -664,14 +647,6 @@ static void handleSerialCommands() {
     while (Serial.available() > 0) {
         char cmd = (char)Serial.read();
         if (cmd == '\r' || cmd == '\n' || cmd == ' ') continue;
-
-        if (cmd >= '0' && cmd <= '0' + PROFILE_COUNT - 1) {
-            int newProfileId = cmd - '0';
-            setActiveProfile(newProfileId, true);
-            Serial.printf("EVENT,profile_changed,%d,%s\n", activeProfileId, activeProfile->name);
-            printActiveProfile();
-            continue;
-        }
 
         switch (cmd) {
             case 'h':
@@ -701,7 +676,7 @@ void setup() {
     Serial1.begin(115200);
     while (!Serial && millis() < 3000);
 
-    setActiveProfile(EXPERIMENT_PROFILE_ID, false);
+    computeProfileBins();
 
     Serial.println("=== PSSS Leak Detector ===");
     printActiveProfile();
